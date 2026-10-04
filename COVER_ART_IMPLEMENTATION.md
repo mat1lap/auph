@@ -141,3 +141,11 @@ images are not required for the test suite. Additional tests exercise original
 URLs, declared dimensions, release conflicts, role gates, lossy derivatives,
 hash caching, EXIF, image modes, malformed payloads, source preservation,
 transient errors, deterministic ties, and unchanged embedded PNG bytes.
+
+## Acquisition/selection follow-up
+
+See [SELECTION_AUDIT.md](SELECTION_AUDIT.md). Provider-supplied iTunes, Deezer,
+Bandcamp and Qobuz URLs are now used without invented high-resolution rewrites.
+Representation fallback validates decoded content, and conversion failures retry
+eligible candidates. The original archival source remains separate from the
+prepared preview/playback derivative.

@@ -156,7 +156,9 @@ def test_musixmatch_subtitle_survives_plain_lyrics_404(monkeypatch: pytest.Monke
 def test_musixmatch_documented_and_desktop_routes_retain_richsync(
     monkeypatch: pytest.MonkeyPatch,
     credential: str,
+    tmp_path: Path,
 ) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.delenv("MUSIXMATCH_API_KEY", raising=False)
     monkeypatch.delenv("MUSIXMATCH_TOKEN", raising=False)
     monkeypatch.setenv(credential, "test-credential")

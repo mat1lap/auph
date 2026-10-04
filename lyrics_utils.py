@@ -2317,7 +2317,9 @@ def fetch_lrclib(
             "isrc": item.get("isrc") or "",
             "language": item.get("language") or "",
             "instrumental": bool(item.get("instrumental")),
-            "providerRaw": synced or plain,
+            "providerRaw": json.dumps(item, ensure_ascii=False, sort_keys=True),
+            "lyricsfile": item.get("lyricsfile") or "",
+            "recording_id": item.get("recording_id") or item.get("musicbrainz_recording_id") or "",
             "rawLyrics": synced or plain,
             "syncedLyrics": synced,
             "plainLyrics": plain or (to_plain(synced) if synced else ""),
@@ -2819,6 +2821,41 @@ def fetch_syncedlyrics_fallback(
     }
 
 
+def _collected_lyrics_result(
+    candidates: list[dict[str, Any]],
+    failures: list[tuple[str, str]],
+    *,
+    source: str,
+    truncated: bool = False,
+) -> dict[str, Any]:
+    """Keep successful independent lookups and their acquisition diagnostics."""
+    if candidates:
+        result = dict(candidates[0])
+        result["alternatives"] = [*result.get("alternatives", []), *candidates[1:]]
+        if truncated:
+            result.setdefault("validationWarnings", []).append(
+                "candidate retrieval truncated to the adapter's bounded limit"
+            )
+        if failures:
+            result.setdefault("validationWarnings", []).append(
+                f"some candidate lookups failed ({', '.join(sorted({status for status, _ in failures}))})"
+            )
+        return result
+    severity = {
+        "AUTHENTICATION_ERROR": 7,
+        "BLOCKED": 6,
+        "RATE_LIMITED": 5,
+        "TRANSIENT_ERROR": 4,
+        "PARSER_ERROR": 3,
+        "INVALID_RESPONSE": 2,
+        "NOT_FOUND": 1,
+    }
+    if not failures:
+        return {"source": source, "acquisition_status": "NOT_FOUND"}
+    status, detail = max(failures, key=lambda item: severity.get(item[0], 0))
+    return {"source": source, "acquisition_status": status, "error": detail}
+
+
 def fetch_megalobiz(
     song: str,
     artist: str,
@@ -2832,6 +2869,8 @@ def fetch_megalobiz(
     search method returns only an LRC string, with no recording identity or
     request timeout, so a same-title live/remix result cannot be validated.
     """
+    acquired_forms: list[dict[str, Any]] = []
+    item_failures: list[tuple[str, str]] = []
     query = f"{artist} {song}".strip()
     headers = {"User-Agent": "AudiophileArchTagger/6.0 (lyrics metadata client)", "Accept": "text/html"}
     search_url = f"https://www.megalobiz.com/search/all?{urllib.parse.urlencode({'qry': query})}"
@@ -2846,50 +2885,60 @@ def fetch_megalobiz(
             return {"source": "Megalobiz", "acquisition_status": "NOT_FOUND"}
         parse_errors: list[str] = []
         for candidate in candidates[:3]:
-            with _provider_urlopen(
-                urllib.request.Request(candidate["url"], headers=headers), timeout=timeout
-            ) as response:
-                detail_page = read_provider_text(response)
-                final = (
-                    urllib.parse.urlparse(response.geturl())
-                    if callable(getattr(response, "geturl", None))
-                    else urllib.parse.urlparse(candidate["url"])
-                )
-            if final.scheme != "https" or final.hostname not in {"megalobiz.com", "www.megalobiz.com"}:
-                return {
-                    "source": "Megalobiz",
-                    "acquisition_status": "INVALID_RESPONSE",
-                    "error": "redirect left provider host",
-                }
             try:
-                raw_lrc = parse_megalobiz_lyrics(detail_page, candidate["id"])
-            except ValueError as exc:
-                parse_errors.append(str(exc))
+                with _provider_urlopen(
+                    urllib.request.Request(candidate["url"], headers=headers), timeout=timeout
+                ) as response:
+                    detail_page = read_provider_text(response)
+                    final = (
+                        urllib.parse.urlparse(response.geturl())
+                        if callable(getattr(response, "geturl", None))
+                        else urllib.parse.urlparse(candidate["url"])
+                    )
+                if final.scheme != "https" or final.hostname not in {"megalobiz.com", "www.megalobiz.com"}:
+                    raise _LyricsAcquisitionError("INVALID_RESPONSE", "redirect left provider host")
+                try:
+                    raw_lrc = parse_megalobiz_lyrics(detail_page, candidate["id"])
+                except ValueError as exc:
+                    parse_errors.append(str(exc))
+                    continue
+                if len(raw_lrc.strip()) < 10 or not ANY_LINE_TIMESTAMP_RE.search(raw_lrc):
+                    parse_errors.append("Megalobiz detail page has no usable LRC timestamps")
+                    continue
+                std_lrc = normalize_synced(raw_lrc, keep_word_sync=False)
+                acquired_forms.append(
+                    {
+                        "found": True,
+                        "source": "Megalobiz (LRC)",
+                        "id": candidate["id"],
+                        "provider_track_id": candidate["id"],
+                        "url": candidate["url"],
+                        "trackName": candidate["title"],
+                        "artistName": candidate["artist"],
+                        "identity_validated": True,
+                        "source_confidence": 55,
+                        "format": "lrc",
+                        "syncType": "linesync",
+                        "providerRaw": raw_lrc,
+                        "rawLyrics": raw_lrc,
+                        "plainLyrics": to_plain(raw_lrc),
+                        "syncedLyrics": std_lrc,
+                        "enhancedLyrics": "",
+                        "duration": None,
+                        "transformations": ["HTML lyrics container decoded; source line order retained"],
+                    }
+                )
+            except (OSError, ValueError, TypeError, KeyError, AttributeError, _LyricsAcquisitionError) as exc:
+                _record_provider_failure(exc)
+                status, detail = classify_lyrics_exception(exc)
+                item_failures.append((status, detail))
+                if status in {"RATE_LIMITED", "AUTHENTICATION_ERROR", "BLOCKED"}:
+                    break
                 continue
-            if len(raw_lrc.strip()) < 10 or not ANY_LINE_TIMESTAMP_RE.search(raw_lrc):
-                parse_errors.append("Megalobiz detail page has no usable LRC timestamps")
-                continue
-            std_lrc = normalize_synced(raw_lrc, keep_word_sync=False)
-            return {
-                "found": True,
-                "source": "Megalobiz (LRC)",
-                "id": candidate["id"],
-                "provider_track_id": candidate["id"],
-                "url": candidate["url"],
-                "trackName": candidate["title"],
-                "artistName": candidate["artist"],
-                "identity_validated": True,
-                "source_confidence": 55,
-                "format": "lrc",
-                "syncType": "linesync",
-                "providerRaw": raw_lrc,
-                "rawLyrics": raw_lrc,
-                "plainLyrics": to_plain(raw_lrc),
-                "syncedLyrics": std_lrc,
-                "enhancedLyrics": "",
-                "duration": None,
-                "transformations": ["HTML lyrics container decoded; source line order retained"],
-            }
+        if acquired_forms or item_failures:
+            return _collected_lyrics_result(
+                acquired_forms, item_failures, source="Megalobiz", truncated=len(candidates) > 3
+            )
         if parse_errors:
             error = ValueError(parse_errors[0])
             _record_provider_failure(error)
@@ -2948,6 +2997,8 @@ def fetch_rentanadviser(
     timeout: int = 6,
 ) -> dict[str, Any] | None:
     """Fetch synchronized lyrics only for a title/artist-verified result row."""
+    acquired_forms: list[dict[str, Any]] = []
+    item_failures: list[tuple[str, str]] = []
     query = f"{artist} {song}".strip()
     headers = {"User-Agent": "AudiophileArchTagger/6.0 (lyrics metadata client)", "Accept": "text/html"}
     search_url = "https://www.rentanadviser.com/en/subtitles/subtitles4songs.aspx?" + urllib.parse.urlencode(
@@ -2964,50 +3015,62 @@ def fetch_rentanadviser(
             return {"source": "RentAnAdviser", "acquisition_status": "NOT_FOUND"}
         parser_errors: list[str] = []
         for result in results[:3]:
-            detail_url = "https://www.rentanadviser.com/subtitles/getsubtitles.aspx?" + urllib.parse.urlencode(
-                {"id": result["id"], "type": "lrc"}
-            )
-            with _provider_urlopen(urllib.request.Request(detail_url, headers=headers), timeout=timeout) as response:
-                page = read_provider_text(response)
-                final = (
-                    urllib.parse.urlparse(response.geturl())
-                    if callable(getattr(response, "geturl", None))
-                    else urllib.parse.urlparse(detail_url)
-                )
-            if final.scheme != "https" or final.hostname != "www.rentanadviser.com":
-                return {
-                    "source": "RentAnAdviser",
-                    "acquisition_status": "INVALID_RESPONSE",
-                    "error": "redirect left provider host",
-                }
             try:
-                raw_lrc = parse_rentanadviser_lyrics(page)
-            except ValueError as exc:
-                parser_errors.append(str(exc))
+                detail_url = "https://www.rentanadviser.com/subtitles/getsubtitles.aspx?" + urllib.parse.urlencode(
+                    {"id": result["id"], "type": "lrc"}
+                )
+                with _provider_urlopen(
+                    urllib.request.Request(detail_url, headers=headers), timeout=timeout
+                ) as response:
+                    page = read_provider_text(response)
+                    final = (
+                        urllib.parse.urlparse(response.geturl())
+                        if callable(getattr(response, "geturl", None))
+                        else urllib.parse.urlparse(detail_url)
+                    )
+                if final.scheme != "https" or final.hostname != "www.rentanadviser.com":
+                    raise _LyricsAcquisitionError("INVALID_RESPONSE", "redirect left provider host")
+                try:
+                    raw_lrc = parse_rentanadviser_lyrics(page)
+                except ValueError as exc:
+                    parser_errors.append(str(exc))
+                    continue
+                if not ANY_LINE_TIMESTAMP_RE.search(raw_lrc):
+                    parser_errors.append("RentAnAdviser lyrics response contains no LRC timestamps")
+                    continue
+                acquired_forms.append(
+                    {
+                        "found": True,
+                        "source": "RentAnAdviser (LRC)",
+                        "id": result["id"],
+                        "provider_track_id": result["id"],
+                        "url": detail_url,
+                        "trackName": result["title"],
+                        "artistName": result["artist"],
+                        "identity_validated": True,
+                        "source_confidence": 52,
+                        "format": "lrc",
+                        "syncType": "linesync",
+                        "providerRaw": raw_lrc,
+                        "rawLyrics": raw_lrc,
+                        "plainLyrics": to_plain(raw_lrc),
+                        "syncedLyrics": raw_lrc,
+                        "enhancedLyrics": "",
+                        "duration": None,
+                        "transformations": ["HTML lyrics field decoded; provider text retained"],
+                    }
+                )
+            except (OSError, ValueError, TypeError, KeyError, AttributeError, _LyricsAcquisitionError) as exc:
+                _record_provider_failure(exc)
+                status, detail = classify_lyrics_exception(exc)
+                item_failures.append((status, detail))
+                if status in {"RATE_LIMITED", "AUTHENTICATION_ERROR", "BLOCKED"}:
+                    break
                 continue
-            if not ANY_LINE_TIMESTAMP_RE.search(raw_lrc):
-                parser_errors.append("RentAnAdviser lyrics response contains no LRC timestamps")
-                continue
-            return {
-                "found": True,
-                "source": "RentAnAdviser (LRC)",
-                "id": result["id"],
-                "provider_track_id": result["id"],
-                "url": detail_url,
-                "trackName": result["title"],
-                "artistName": result["artist"],
-                "identity_validated": True,
-                "source_confidence": 52,
-                "format": "lrc",
-                "syncType": "linesync",
-                "providerRaw": raw_lrc,
-                "rawLyrics": raw_lrc,
-                "plainLyrics": to_plain(raw_lrc),
-                "syncedLyrics": raw_lrc,
-                "enhancedLyrics": "",
-                "duration": None,
-                "transformations": ["HTML lyrics field decoded; provider text retained"],
-            }
+        if acquired_forms or item_failures:
+            return _collected_lyrics_result(
+                acquired_forms, item_failures, source="RentAnAdviser", truncated=len(results) > 3
+            )
         if parser_errors:
             error = ValueError(parser_errors[0])
             _record_provider_failure(error)
@@ -3192,8 +3255,6 @@ def fetch_musixmatch(
     desktop_token = _musixmatch_desktop_token()
     if _route == "auto" and api_key and desktop_token:
         documented = fetch_musixmatch(song, artist, album, duration, timeout, _route="documented")
-        if documented and documented.get("has_word_sync"):
-            return documented
         desktop = fetch_musixmatch(song, artist, album, duration, timeout, _route="desktop")
         if desktop and desktop.get("found"):
             if documented and documented.get("found"):
@@ -3303,6 +3364,7 @@ def fetch_musixmatch(
     matching.sort(key=lambda entry: (-entry[0], str(entry[1].get("track_id"))))
     candidates: list[dict[str, Any]] = []
     observed_not_found = False
+    acquisition_failures: list[tuple[str, str]] = []
 
     def preserve_partial_or_fail(status: str, detail: str) -> dict[str, Any]:
         if candidates:
@@ -3340,7 +3402,9 @@ def fetch_musixmatch(
             if exc.status == "NOT_FOUND":
                 observed_not_found = True
             else:
-                return preserve_partial_or_fail(exc.status, str(exc))
+                if exc.status in {"RATE_LIMITED", "AUTHENTICATION_ERROR", "BLOCKED"}:
+                    return preserve_partial_or_fail(exc.status, str(exc))
+                acquisition_failures.append((exc.status, str(exc)))
         except urllib.error.HTTPError as exc:
             status = {401: "AUTHENTICATION_ERROR", 403: "BLOCKED", 404: "NOT_FOUND", 429: "RATE_LIMITED"}.get(
                 exc.code, "TRANSIENT_ERROR" if exc.code >= 500 else "INVALID_RESPONSE"
@@ -3348,12 +3412,16 @@ def fetch_musixmatch(
             if status == "NOT_FOUND":
                 observed_not_found = True
             else:
-                return preserve_partial_or_fail(status, f"Musixmatch track.lyrics.get HTTP {exc.code}")
+                detail = f"Musixmatch track.lyrics.get HTTP {exc.code}"
+                if status in {"RATE_LIMITED", "AUTHENTICATION_ERROR", "BLOCKED"}:
+                    return preserve_partial_or_fail(status, detail)
+                acquisition_failures.append((status, detail))
         except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
             status, detail = classify_lyrics_exception(exc)
-            return preserve_partial_or_fail(status, detail)
+            acquisition_failures.append((status, detail))
         if len(raw_text) > MAX_LYRICS_CHARS:
-            return preserve_partial_or_fail("INVALID_RESPONSE", "lyrics exceed safety limit")
+            acquisition_failures.append(("INVALID_RESPONSE", "lyrics exceed safety limit"))
+            raw_text = parsed_text = ""
         track_duration = track.get("_track_duration")
         metadata = {
             "acquisition_route": "documented_api" if api_key else "configured_desktop",
@@ -3425,6 +3493,7 @@ def fetch_musixmatch(
                     )
                     if not parsed_sync:
                         raise ValueError("Musixmatch richsync body has no valid word timing")
+                    complete_plain = candidate["plainLyrics"]
                     candidate.update(
                         {
                             key: parsed_sync[key]
@@ -3439,10 +3508,15 @@ def fetch_musixmatch(
                             )
                         }
                     )
+                    if complete_plain:
+                        candidate["plainLyrics"] = complete_plain
                     candidate["providerRaw"] = raw_sync
                     candidate["providerMetadata"]["plain_lyrics_raw"] = raw_text
                     candidate["providerMetadata"]["richsync_id"] = obj.get("richsync_id")
-                elif not candidate.get("syncedLyrics"):
+                else:
+                    candidate["providerMetadata"]["subtitle_raw"] = raw_sync
+                    if candidate.get("syncedLyrics"):
+                        continue
                     valid, reasons = validate_lrc(raw_sync, duration=track_duration)
                     if not valid:
                         raise ValueError(f"Musixmatch subtitle timing invalid: {', '.join(reasons)}")
@@ -3467,12 +3541,12 @@ def fetch_musixmatch(
         else:
             observed_not_found = True
 
-    if candidates:
-        candidates[0]["alternatives"] = candidates[1:]
-        return candidates[0]
+    if candidates or acquisition_failures:
+        return _collected_lyrics_result(
+            candidates, acquisition_failures, source="Musixmatch", truncated=len(matching) > 5
+        )
     if observed_not_found:
         mark_provider_not_found()
-        return {"source": "Musixmatch", "acquisition_status": "NOT_FOUND"}
     return {"source": "Musixmatch", "acquisition_status": "NOT_FOUND"}
 
 
@@ -3683,9 +3757,9 @@ def parse_clonehero_chart(
                 k, v = line.split("=", 1)
                 k = k.strip().lower()
                 v = v.strip().strip('"')
-                if k == "name" and not title:
+                if k == "name":
                     title = v
-                elif k == "artist" and not art:
+                elif k == "artist":
                     art = v
                 elif k == "resolution" and v.isdigit():
                     resolution = int(v)
@@ -3785,6 +3859,8 @@ def parse_clonehero_chart(
 
     return {
         "found": True,
+        "trackName": title,
+        "artistName": art,
         "source": "Chorus (Clone Hero / Rock Band)",
         "format": "elrc",
         "syncType": "richsync",
@@ -4042,172 +4118,206 @@ def fetch_chorus_chart(
             if not chart_candidates:
                 mark_provider_not_found()
                 return {"source": "Chorus", "acquisition_status": "NOT_FOUND"}
-            best_chart = chart_candidates[0] if chart_candidates else None
-            if not best_chart or not best_chart.get("md5"):
-                return {
-                    "source": "Chorus",
-                    "acquisition_status": "INVALID_RESPONSE",
-                    "error": "Enchor matched chart has no package identifier",
-                }
 
-            chart_md5 = best_chart["md5"]
-            enc_ver = best_chart.get("encoderVersion", 0)
-            has_vid = best_chart.get("hasVideoBackground", False)
+            def retrieve_chart(best_chart: dict[str, Any]) -> dict[str, Any]:
+                if not best_chart or not best_chart.get("md5"):
+                    return {
+                        "source": "Chorus",
+                        "acquisition_status": "INVALID_RESPONSE",
+                        "error": "Enchor matched chart has no package identifier",
+                    }
 
-            sng_prefix = f"charts/v{enc_ver}/" if enc_ver and enc_ver > 0 else ""
-            sng_name = f"{chart_md5}_novideo.sng" if has_vid else f"{chart_md5}.sng"
-            sng_urls = [
-                f"https://files.enchor.us/{sng_prefix}{sng_name}",
-                f"https://files.enchor.us/{chart_md5}.sng",
-            ]
+                chart_md5 = best_chart["md5"]
+                enc_ver = best_chart.get("encoderVersion", 0)
+                has_vid = best_chart.get("hasVideoBackground", False)
 
-            raw_sng = None
-            package_failures: list[tuple[str, str]] = []
-            for sng_url in sng_urls:
-                try:
-                    s_req = urllib.request.Request(sng_url, headers={"User-Agent": "Mozilla/5.0"})
-                    with _provider_urlopen(s_req, timeout=min(timeout, 8)) as s_resp:
-                        raw_sng = s_resp.read()
-                        if raw_sng.startswith(b"SNGPKG"):
-                            break
-                        raise ValueError("Enchor package response is not an SNGPKG archive")
-                except Exception as exc:
-                    package_failures.append(classify_lyrics_exception(exc))
-                    continue
+                sng_prefix = f"charts/v{enc_ver}/" if enc_ver and enc_ver > 0 else ""
+                sng_name = f"{chart_md5}_novideo.sng" if has_vid else f"{chart_md5}.sng"
+                sng_urls = [
+                    f"https://files.enchor.us/{sng_prefix}{sng_name}",
+                    f"https://files.enchor.us/{chart_md5}.sng",
+                ]
 
-            if not raw_sng or not raw_sng.startswith(b"SNGPKG") or len(raw_sng) < 26:
-                if package_failures:
-                    status, detail = max(
-                        package_failures,
-                        key=lambda item: {
-                            "AUTHENTICATION_ERROR": 7,
-                            "BLOCKED": 6,
-                            "RATE_LIMITED": 5,
-                            "TRANSIENT_ERROR": 4,
-                            "PARSER_ERROR": 3,
-                            "INVALID_RESPONSE": 2,
-                            "NOT_FOUND": 1,
-                        }.get(item[0], 0),
-                    )
-                    return {"source": "Chorus", "acquisition_status": status, "error": detail}
-                return {
-                    "source": "Chorus",
-                    "acquisition_status": "INVALID_RESPONSE",
-                    "error": "Enchor returned an empty or malformed chart package",
-                }
-            if len(raw_sng) > _MAX_PROVIDER_RESPONSE_BYTES:
-                return {
-                    "source": "Chorus",
-                    "acquisition_status": "INVALID_RESPONSE",
-                    "error": "Enchor chart package exceeds the provider response limit",
-                }
-            if len(raw_sng) < 42:
-                return {
-                    "source": "Chorus",
-                    "acquisition_status": "INVALID_RESPONSE",
-                    "error": "Enchor chart package header is truncated",
-                }
+                raw_sng = None
+                package_failures: list[tuple[str, str]] = []
+                for sng_url in sng_urls:
+                    try:
+                        s_req = urllib.request.Request(sng_url, headers={"User-Agent": "Mozilla/5.0"})
+                        with _provider_urlopen(s_req, timeout=min(timeout, 8)) as s_resp:
+                            raw_sng = s_resp.read()
+                            if raw_sng.startswith(b"SNGPKG"):
+                                break
+                            raise ValueError("Enchor package response is not an SNGPKG archive")
+                    except Exception as exc:
+                        package_failures.append(classify_lyrics_exception(exc))
+                        continue
 
-            xor_mask = raw_sng[10:26]
-            pos = 26
-            _meta_len, meta_cnt = struct.unpack_from("<QQ", raw_sng, pos)
-            pos += 16
-            if meta_cnt > (len(raw_sng) - pos) // 8:
-                raise ValueError("Enchor package metadata count exceeds its bounds")
-            for _ in range(meta_cnt):
-                if pos + 4 > len(raw_sng):
-                    raise ValueError("Enchor package metadata key length is truncated")
-                (k_len,) = struct.unpack_from("<i", raw_sng, pos)
-                if k_len < 0 or k_len > len(raw_sng) - pos - 4:
-                    raise ValueError("Enchor package metadata key length is invalid")
-                pos += 4 + k_len
-                if pos + 4 > len(raw_sng):
-                    raise ValueError("Enchor package metadata value length is truncated")
-                (v_len,) = struct.unpack_from("<i", raw_sng, pos)
-                if v_len < 0 or v_len > len(raw_sng) - pos - 4:
-                    raise ValueError("Enchor package metadata value length is invalid")
-                pos += 4 + v_len
+                if not raw_sng or not raw_sng.startswith(b"SNGPKG") or len(raw_sng) < 26:
+                    if package_failures:
+                        status, detail = max(
+                            package_failures,
+                            key=lambda item: {
+                                "AUTHENTICATION_ERROR": 7,
+                                "BLOCKED": 6,
+                                "RATE_LIMITED": 5,
+                                "TRANSIENT_ERROR": 4,
+                                "PARSER_ERROR": 3,
+                                "INVALID_RESPONSE": 2,
+                                "NOT_FOUND": 1,
+                            }.get(item[0], 0),
+                        )
+                        return {"source": "Chorus", "acquisition_status": status, "error": detail}
+                    return {
+                        "source": "Chorus",
+                        "acquisition_status": "INVALID_RESPONSE",
+                        "error": "Enchor returned an empty or malformed chart package",
+                    }
+                if len(raw_sng) > _MAX_PROVIDER_RESPONSE_BYTES:
+                    return {
+                        "source": "Chorus",
+                        "acquisition_status": "INVALID_RESPONSE",
+                        "error": "Enchor chart package exceeds the provider response limit",
+                    }
+                if len(raw_sng) < 42:
+                    return {
+                        "source": "Chorus",
+                        "acquisition_status": "INVALID_RESPONSE",
+                        "error": "Enchor chart package header is truncated",
+                    }
 
-            if pos + 16 > len(raw_sng):
-                raise ValueError("Enchor package file table header is truncated")
-            _f_meta_len, f_meta_cnt = struct.unpack_from("<QQ", raw_sng, pos)
-            pos += 16
-            if f_meta_cnt > (len(raw_sng) - pos) // 17:
-                raise ValueError("Enchor package file count exceeds its bounds")
-            chart_file_info = None
-            midi_file_info = None
-            for _ in range(f_meta_cnt):
-                if pos + 1 > len(raw_sng):
-                    raise ValueError("Enchor package file name length is truncated")
-                (fn_len,) = struct.unpack_from("<b", raw_sng, pos)
-                pos += 1
-                if fn_len < 0 or fn_len > len(raw_sng) - pos - 16:
-                    raise ValueError("Enchor package file name length is invalid")
-                fn = raw_sng[pos : pos + fn_len].decode("utf-8", errors="strict").lower()
-                pos += fn_len
-                if pos + 16 > len(raw_sng):
-                    raise ValueError("Enchor package file entry is truncated")
-                c_len, c_idx = struct.unpack_from("<QQ", raw_sng, pos)
+                xor_mask = raw_sng[10:26]
+                pos = 26
+                _meta_len, meta_cnt = struct.unpack_from("<QQ", raw_sng, pos)
                 pos += 16
-                if c_idx > len(raw_sng) or c_len > len(raw_sng) - c_idx:
-                    raise ValueError("Enchor package file points outside the archive")
-                if fn.endswith(".chart"):
-                    chart_file_info = (c_len, c_idx)
-                elif fn.endswith((".mid", ".midi")):
-                    midi_file_info = (c_len, c_idx)
+                if meta_cnt > (len(raw_sng) - pos) // 8:
+                    raise ValueError("Enchor package metadata count exceeds its bounds")
+                for _ in range(meta_cnt):
+                    if pos + 4 > len(raw_sng):
+                        raise ValueError("Enchor package metadata key length is truncated")
+                    (k_len,) = struct.unpack_from("<i", raw_sng, pos)
+                    if k_len < 0 or k_len > len(raw_sng) - pos - 4:
+                        raise ValueError("Enchor package metadata key length is invalid")
+                    pos += 4 + k_len
+                    if pos + 4 > len(raw_sng):
+                        raise ValueError("Enchor package metadata value length is truncated")
+                    (v_len,) = struct.unpack_from("<i", raw_sng, pos)
+                    if v_len < 0 or v_len > len(raw_sng) - pos - 4:
+                        raise ValueError("Enchor package metadata value length is invalid")
+                    pos += 4 + v_len
 
-            def unmask_chunk(c_len: int, c_idx: int) -> bytes:
-                if c_len > len(raw_sng) or c_idx > len(raw_sng) or c_len > len(raw_sng) - c_idx:
-                    raise ValueError("Enchor chart data range is invalid")
-                data = raw_sng[c_idx : c_idx + c_len]
-                out = bytearray(c_len)
-                a = 0
-                for l in range(c_len):
-                    out[l] = data[l] ^ xor_mask[a % 16] ^ a
-                    a = (a + 1) % 256
-                return bytes(out)
+                if pos + 16 > len(raw_sng):
+                    raise ValueError("Enchor package file table header is truncated")
+                _f_meta_len, f_meta_cnt = struct.unpack_from("<QQ", raw_sng, pos)
+                pos += 16
+                if f_meta_cnt > (len(raw_sng) - pos) // 17:
+                    raise ValueError("Enchor package file count exceeds its bounds")
+                chart_file_info = None
+                midi_file_info = None
+                for _ in range(f_meta_cnt):
+                    if pos + 1 > len(raw_sng):
+                        raise ValueError("Enchor package file name length is truncated")
+                    (fn_len,) = struct.unpack_from("<b", raw_sng, pos)
+                    pos += 1
+                    if fn_len < 0 or fn_len > len(raw_sng) - pos - 16:
+                        raise ValueError("Enchor package file name length is invalid")
+                    fn = raw_sng[pos : pos + fn_len].decode("utf-8", errors="strict").lower()
+                    pos += fn_len
+                    if pos + 16 > len(raw_sng):
+                        raise ValueError("Enchor package file entry is truncated")
+                    c_len, c_idx = struct.unpack_from("<QQ", raw_sng, pos)
+                    pos += 16
+                    if c_idx > len(raw_sng) or c_len > len(raw_sng) - c_idx:
+                        raise ValueError("Enchor package file points outside the archive")
+                    if fn.endswith(".chart"):
+                        chart_file_info = (c_len, c_idx)
+                    elif fn.endswith((".mid", ".midi")):
+                        midi_file_info = (c_len, c_idx)
 
-            if chart_file_info:
-                c_len, c_idx = chart_file_info
-                chart_bytes = unmask_chunk(c_len, c_idx)
-                chart_text = chart_bytes.decode("utf-8", errors="strict")
-                res = parse_clonehero_chart(chart_text, song=song, artist=artist, album=album, duration=duration)
-                if res and res.get("has_word_sync"):
-                    # The search item carries recording identity for MIDI
-                    # packages, which do not embed title/artist metadata.
-                    res.update(
-                        {
-                            "trackName": res.get("trackName") or best_chart["_matched_title"],
-                            "artistName": res.get("artistName") or best_chart["_matched_artist"],
-                            "albumName": str(best_chart.get("album") or best_chart.get("albumName") or ""),
-                            "duration": res.get("duration") or best_chart.get("_matched_duration"),
-                            "provider_track_id": str(best_chart.get("md5") or ""),
-                            "id": str(best_chart.get("md5") or ""),
-                            "identity_validated": True,
-                            "source_confidence": 35,
-                        }
-                    )
-                    return res
+                def unmask_chunk(c_len: int, c_idx: int) -> bytes:
+                    if c_len > len(raw_sng) or c_idx > len(raw_sng) or c_len > len(raw_sng) - c_idx:
+                        raise ValueError("Enchor chart data range is invalid")
+                    data = raw_sng[c_idx : c_idx + c_len]
+                    out = bytearray(c_len)
+                    a = 0
+                    for l in range(c_len):
+                        out[l] = data[l] ^ xor_mask[a % 16] ^ a
+                        a = (a + 1) % 256
+                    return bytes(out)
 
-            if midi_file_info:
-                c_len, c_idx = midi_file_info
-                midi_bytes = unmask_chunk(c_len, c_idx)
-                res = parse_clonehero_midi(midi_bytes, song=song, artist=artist, album=album, duration=duration)
-                if res and res.get("has_word_sync"):
-                    res.update(
-                        {
-                            "trackName": best_chart["_matched_title"],
-                            "artistName": best_chart["_matched_artist"],
-                            "albumName": str(best_chart.get("album") or best_chart.get("albumName") or ""),
-                            "duration": res.get("duration") or best_chart.get("_matched_duration"),
-                            "provider_track_id": str(best_chart.get("md5") or ""),
-                            "id": str(best_chart.get("md5") or ""),
-                            "identity_validated": True,
-                            "source_confidence": 35,
-                        }
-                    )
-                    return res
-            raise ValueError("Enchor package contains no usable vocal chart")
+                if chart_file_info:
+                    c_len, c_idx = chart_file_info
+                    chart_bytes = unmask_chunk(c_len, c_idx)
+                    chart_text = chart_bytes.decode("utf-8", errors="strict")
+                    res = parse_clonehero_chart(chart_text, song=song, artist=artist, album=album, duration=duration)
+                    if (
+                        res
+                        and res.get("has_word_sync")
+                        and is_track_match(
+                            str(res.get("trackName") or ""), str(res.get("artistName") or ""), song, artist
+                        )
+                    ):
+                        # The search item carries recording identity for MIDI
+                        # packages, which do not embed title/artist metadata.
+                        res.update(
+                            {
+                                "trackName": res.get("trackName") or best_chart["_matched_title"],
+                                "artistName": res.get("artistName") or best_chart["_matched_artist"],
+                                "albumName": str(best_chart.get("album") or best_chart.get("albumName") or ""),
+                                "duration": res.get("duration") or best_chart.get("_matched_duration"),
+                                "provider_track_id": str(best_chart.get("md5") or ""),
+                                "id": str(best_chart.get("md5") or ""),
+                                "identity_validated": True,
+                                "source_confidence": 35,
+                                "providerRaw": chart_text,
+                            }
+                        )
+                        return res
+
+                if midi_file_info:
+                    c_len, c_idx = midi_file_info
+                    midi_bytes = unmask_chunk(c_len, c_idx)
+                    res = parse_clonehero_midi(midi_bytes, song=song, artist=artist, album=album, duration=duration)
+                    if res and res.get("has_word_sync"):
+                        res.update(
+                            {
+                                "trackName": best_chart["_matched_title"],
+                                "artistName": best_chart["_matched_artist"],
+                                "albumName": str(best_chart.get("album") or best_chart.get("albumName") or ""),
+                                "duration": res.get("duration") or best_chart.get("_matched_duration"),
+                                "provider_track_id": str(best_chart.get("md5") or ""),
+                                "id": str(best_chart.get("md5") or ""),
+                                "identity_validated": True,
+                                "source_confidence": 35,
+                                "providerRaw": json.dumps(
+                                    {
+                                        "format": "midi",
+                                        "encoding": "base64",
+                                        "data": base64.b64encode(midi_bytes).decode("ascii"),
+                                    }
+                                ),
+                            }
+                        )
+                        return res
+                raise ValueError("Enchor package contains no usable vocal chart")
+
+            results: list[dict[str, Any]] = []
+            failures: list[tuple[str, str]] = []
+            for chart in chart_candidates[:5]:
+                try:
+                    candidate = retrieve_chart(chart)
+                except (OSError, ValueError, TypeError, KeyError, AttributeError, struct.error) as exc:
+                    _record_provider_failure(exc)
+                    failures.append(classify_lyrics_exception(exc))
+                    continue
+                if candidate.get("found"):
+                    results.append(candidate)
+                elif candidate.get("acquisition_status"):
+                    status = str(candidate["acquisition_status"])
+                    failures.append((status, str(candidate.get("error") or "chart unavailable")))
+                    if status in {"RATE_LIMITED", "AUTHENTICATION_ERROR", "BLOCKED"}:
+                        break
+            return _collected_lyrics_result(results, failures, source="Chorus", truncated=len(chart_candidates) > 5)
+
     except Exception as exc:
         _record_provider_failure(exc)
         status, detail = classify_lyrics_exception(exc)
@@ -4658,6 +4768,8 @@ def fetch_petitlyrics(
     timeout: int = 6,
 ) -> dict[str, Any] | None:
     """Fetch a title/artist matched result from PetitLyrics' static HTML."""
+    acquired_forms: list[dict[str, Any]] = []
+    item_failures: list[tuple[str, str]] = []
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -4686,40 +4798,54 @@ def fetch_petitlyrics(
 
     parser_failures: list[str] = []
     for candidate in candidates[:3]:
-        t_url = candidate["url"]
         try:
-            treq = urllib.request.Request(t_url, headers=headers)
-            with _provider_urlopen(treq, timeout=min(timeout, 4)) as tresp:
-                thtml = read_provider_text(tresp)
-            decoded_lyrics = parse_petitlyrics_page(thtml)
-        except (OSError, ValueError) as exc:
-            status, error = classify_lyrics_exception(exc)
-            if status in {"BLOCKED", "RATE_LIMITED", "TRANSIENT_ERROR", "AUTHENTICATION_ERROR"}:
-                return {"source": "PetitLyrics", "acquisition_status": status, "error": error}
-            parser_failures.append(error)
+            t_url = candidate["url"]
+            try:
+                treq = urllib.request.Request(t_url, headers=headers)
+                with _provider_urlopen(treq, timeout=min(timeout, 4)) as tresp:
+                    thtml = read_provider_text(tresp)
+                decoded_lyrics = parse_petitlyrics_page(thtml)
+            except (OSError, ValueError) as exc:
+                status, error = classify_lyrics_exception(exc)
+                if status in {"BLOCKED", "RATE_LIMITED", "TRANSIENT_ERROR", "AUTHENTICATION_ERROR"}:
+                    raise _LyricsAcquisitionError(status, error)
+                parser_failures.append(error)
+                continue
+            if len(decoded_lyrics.strip()) > 20:
+                acquired_forms.append(
+                    {
+                        "found": True,
+                        "source": "PetitLyrics (Web)",
+                        "id": candidate["id"],
+                        "provider_track_id": candidate["id"],
+                        "url": t_url,
+                        "trackName": candidate["title"],
+                        "artistName": candidate["artist"],
+                        "identity_validated": True,
+                        "source_confidence": 70,
+                        "format": "plain",
+                        "syncType": "none",
+                        "has_word_sync": False,
+                        "has_back_vocals": False,
+                        "providerRaw": decoded_lyrics,
+                        "rawLyrics": decoded_lyrics,
+                        "plainLyrics": decoded_lyrics,
+                        "syncedLyrics": "",
+                        "enhancedLyrics": "",
+                        "ttmlLyrics": "",
+                    }
+                )
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, _LyricsAcquisitionError) as exc:
+            _record_provider_failure(exc)
+            status, detail = classify_lyrics_exception(exc)
+            item_failures.append((status, detail))
+            if status in {"RATE_LIMITED", "AUTHENTICATION_ERROR", "BLOCKED"}:
+                break
             continue
-        if len(decoded_lyrics.strip()) > 20:
-            return {
-                "found": True,
-                "source": "PetitLyrics (Web)",
-                "id": candidate["id"],
-                "provider_track_id": candidate["id"],
-                "url": t_url,
-                "trackName": candidate["title"],
-                "artistName": candidate["artist"],
-                "identity_validated": True,
-                "source_confidence": 70,
-                "format": "plain",
-                "syncType": "none",
-                "has_word_sync": False,
-                "has_back_vocals": False,
-                "providerRaw": decoded_lyrics,
-                "rawLyrics": decoded_lyrics,
-                "plainLyrics": decoded_lyrics,
-                "syncedLyrics": "",
-                "enhancedLyrics": "",
-                "ttmlLyrics": "",
-            }
+    if acquired_forms or item_failures:
+        return _collected_lyrics_result(
+            acquired_forms, item_failures, source="PetitLyrics", truncated=len(candidates) > 3
+        )
 
     if parser_failures:
         return {"source": "PetitLyrics", "acquisition_status": "PARSER_ERROR", "error": parser_failures[0]}
@@ -4735,6 +4861,8 @@ def fetch_vk_music_lyrics(
     timeout: int = 6,
 ) -> dict[str, Any] | None:
     """Use VK's token-authenticated API; do not scrape logged-in web sessions."""
+    acquired_forms: list[dict[str, Any]] = []
+    item_failures: list[tuple[str, str]] = []
     headers = {"User-Agent": "AudiophileArchTagger/6.0 (lyrics metadata client)", "Accept": "application/json"}
     token = os.environ.get("VK_TOKEN", "").strip()
     token_file = Path.home() / ".config" / "vk_token"
@@ -4780,53 +4908,67 @@ def fetch_vk_music_lyrics(
         if not isinstance(items, list):
             raise TypeError("VK audio.search response is missing response.items")
         for item in items:
-            if not isinstance(item, dict):
-                continue
-            title = str(item.get("title") or "")
-            item_artist = str(item.get("artist") or "")
-            raw_duration = item.get("duration")
             try:
-                candidate_duration = float(raw_duration) if raw_duration is not None else None
-            except (TypeError, ValueError):
-                candidate_duration = None
-            if candidate_duration is not None and (not math.isfinite(candidate_duration) or candidate_duration <= 0):
-                candidate_duration = None
-            if not is_track_match(
-                title, item_artist, song, artist, cand_duration=candidate_duration, target_duration=duration
-            ):
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "")
+                item_artist = str(item.get("artist") or "")
+                raw_duration = item.get("duration")
+                try:
+                    candidate_duration = float(raw_duration) if raw_duration is not None else None
+                except (TypeError, ValueError):
+                    candidate_duration = None
+                if candidate_duration is not None and (
+                    not math.isfinite(candidate_duration) or candidate_duration <= 0
+                ):
+                    candidate_duration = None
+                if not is_track_match(
+                    title, item_artist, song, artist, cand_duration=candidate_duration, target_duration=duration
+                ):
+                    continue
+                lyrics_id = item.get("lyrics_id")
+                if not lyrics_id:
+                    continue
+                lyric_response = api_request("audio.getLyrics", {"lyrics_id": str(lyrics_id)})
+                lyric_body = lyric_response.get("response")
+                text = lyric_body.get("text") if isinstance(lyric_body, dict) else None
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                audio_id = str(item.get("id") or lyrics_id)
+                album_obj = item.get("album")
+                album_name = str(album_obj.get("title") or "") if isinstance(album_obj, dict) else ""
+                synced = bool(ANY_LINE_TIMESTAMP_RE.search(text))
+                acquired_forms.append(
+                    {
+                        "found": True,
+                        "source": "VK Music API",
+                        "id": str(lyrics_id),
+                        "provider_track_id": audio_id,
+                        "provider_lyrics_id": str(lyrics_id),
+                        "trackName": title,
+                        "artistName": item_artist,
+                        "albumName": album_name,
+                        "duration": candidate_duration,
+                        "identity_validated": True,
+                        "format": "lrc" if synced else "plain",
+                        "syncType": "linesync" if synced else "none",
+                        "providerRaw": text,
+                        "rawLyrics": text,
+                        "plainLyrics": to_plain(text) if synced else text,
+                        "syncedLyrics": text if synced else "",
+                        "enhancedLyrics": "",
+                        "transformations": ["VK API response text retained without cosmetic cleanup"],
+                    }
+                )
+            except (OSError, ValueError, TypeError, KeyError, AttributeError, _LyricsAcquisitionError) as exc:
+                _record_provider_failure(exc)
+                status, detail = classify_lyrics_exception(exc)
+                item_failures.append((status, detail))
+                if status in {"RATE_LIMITED", "AUTHENTICATION_ERROR", "BLOCKED"}:
+                    break
                 continue
-            lyrics_id = item.get("lyrics_id")
-            if not lyrics_id:
-                continue
-            lyric_response = api_request("audio.getLyrics", {"lyrics_id": str(lyrics_id)})
-            lyric_body = lyric_response.get("response")
-            text = lyric_body.get("text") if isinstance(lyric_body, dict) else None
-            if not isinstance(text, str) or not text.strip():
-                continue
-            audio_id = str(item.get("id") or lyrics_id)
-            album_obj = item.get("album")
-            album_name = str(album_obj.get("title") or "") if isinstance(album_obj, dict) else ""
-            synced = bool(ANY_LINE_TIMESTAMP_RE.search(text))
-            return {
-                "found": True,
-                "source": "VK Music API",
-                "id": str(lyrics_id),
-                "provider_track_id": audio_id,
-                "provider_lyrics_id": str(lyrics_id),
-                "trackName": title,
-                "artistName": item_artist,
-                "albumName": album_name,
-                "duration": candidate_duration,
-                "identity_validated": True,
-                "format": "lrc" if synced else "plain",
-                "syncType": "linesync" if synced else "none",
-                "providerRaw": text,
-                "rawLyrics": text,
-                "plainLyrics": to_plain(text) if synced else text,
-                "syncedLyrics": text if synced else "",
-                "enhancedLyrics": "",
-                "transformations": ["VK API response text retained without cosmetic cleanup"],
-            }
+        if acquired_forms or item_failures:
+            return _collected_lyrics_result(acquired_forms, item_failures, source="VK Music API")
         mark_provider_not_found()
         return {"source": "VK Music API", "acquisition_status": "NOT_FOUND"}
     except _LyricsAcquisitionError as exc:
@@ -4901,6 +5043,7 @@ def fetch_vk_topics(
 ) -> dict[str, Any] | None:
     """Read public VK topic lyrics after visible track identity is verified."""
     errors: list[tuple[str, str]] = []
+    acquired_forms: list[dict[str, Any]] = []
     vk_token = os.environ.get("VK_TOKEN", "").strip()
     token_file = Path.home() / ".config" / "vk_token"
     if not vk_token and token_file.is_file():
@@ -4939,7 +5082,7 @@ def fetch_vk_topics(
                 items = response_data.get("items") if isinstance(response_data, dict) else None
                 if not isinstance(items, list):
                     raise TypeError("VK newsfeed.search response is missing response.items")
-                for item in items:
+                for item in items[:10]:
                     if not isinstance(item, dict):
                         continue
                     text_value = str(item.get("text") or "")
@@ -4947,24 +5090,29 @@ def fetch_vk_topics(
                         " ".join(line.strip() for line in text_value.splitlines()[:3] if line.strip()), song, artist
                     )
                     if identity and len(clean_plain_lyrics_for_alignment(text_value)) > 60:
-                        return {
-                            "found": True,
-                            "source": "VK Topics API",
-                            "trackName": identity[0],
-                            "artistName": identity[1],
-                            "identity_validated": True,
-                            "source_confidence": 35,
-                            "format": "plain",
-                            "syncType": "none",
-                            "providerRaw": text_value,
-                            "rawLyrics": text_value,
-                            "plainLyrics": text_value,
-                            "syncedLyrics": "",
-                            "enhancedLyrics": "",
-                        }
+                        acquired_forms.append(
+                            {
+                                "found": True,
+                                "source": "VK Topics API",
+                                "trackName": identity[0],
+                                "artistName": identity[1],
+                                "identity_validated": True,
+                                "source_confidence": 35,
+                                "format": "plain",
+                                "syncType": "none",
+                                "providerRaw": text_value,
+                                "rawLyrics": text_value,
+                                "plainLyrics": text_value,
+                                "syncedLyrics": "",
+                                "enhancedLyrics": "",
+                            }
+                        )
         except (OSError, ValueError, TypeError) as exc:
             status, detail = classify_lyrics_exception(exc)
             errors.append((status, detail))
+
+    if acquired_forms:
+        return _collected_lyrics_result(acquired_forms, errors, source="VK Topics API")
 
     query = f'site:vk.com/topic "{artist}" "{song}" текст песни'
     headers = {"User-Agent": "AudiophileArchTagger/6.0 (public topic lookup)", "Accept": "text/html"}
@@ -4976,58 +5124,60 @@ def fetch_vk_topics(
             return {"source": "VK Topics", "acquisition_status": "BLOCKED", "error": "search provider challenge page"}
         topics = parse_vk_topics_search(search_page, song, artist)
         for topic in topics[:3]:
-            with _provider_urlopen(urllib.request.Request(topic["url"], headers=headers), timeout=timeout) as response:
-                page = read_provider_text(response)
-                final = (
-                    urllib.parse.urlparse(response.geturl())
-                    if callable(getattr(response, "geturl", None))
-                    else urllib.parse.urlparse(topic["url"])
-                )
-            if final.scheme != "https" or final.hostname not in {"vk.com", "www.vk.com", "m.vk.com"}:
-                return {
-                    "source": "VK Topics",
-                    "acquisition_status": "BLOCKED",
-                    "error": "topic requires authentication or left public host",
-                }
-            if _provider_page_blocked(page):
-                return {"source": "VK Topics", "acquisition_status": "BLOCKED", "error": "provider challenge page"}
             try:
-                matched = parse_vk_topics_page(page, song, artist)
-            except ValueError as exc:
-                errors.append(("PARSER_ERROR", str(exc)))
+                with _provider_urlopen(
+                    urllib.request.Request(topic["url"], headers=headers), timeout=timeout
+                ) as response:
+                    page = read_provider_text(response)
+                    final = (
+                        urllib.parse.urlparse(response.geturl())
+                        if callable(getattr(response, "geturl", None))
+                        else urllib.parse.urlparse(topic["url"])
+                    )
+                if final.scheme != "https" or final.hostname not in {"vk.com", "www.vk.com", "m.vk.com"}:
+                    errors.append(("BLOCKED", "topic requires authentication or left public host"))
+                    break
+                if _provider_page_blocked(page):
+                    errors.append(("BLOCKED", "provider challenge page"))
+                    break
+                try:
+                    matched = parse_vk_topics_page(page, song, artist)
+                except ValueError as exc:
+                    errors.append(("PARSER_ERROR", str(exc)))
+                    continue
+                if matched:
+                    acquired_forms.append(
+                        {
+                            "found": True,
+                            "source": "VK Topics",
+                            "url": topic["url"],
+                            "trackName": matched["title"],
+                            "artistName": matched["artist"],
+                            "identity_validated": True,
+                            "source_confidence": 30,
+                            "format": "plain",
+                            "syncType": "none",
+                            "providerRaw": matched["text"],
+                            "rawLyrics": matched["text"],
+                            "plainLyrics": matched["text"],
+                            "syncedLyrics": "",
+                            "enhancedLyrics": "",
+                        }
+                    )
+            except (OSError, ValueError, TypeError) as exc:
+                status, detail = classify_lyrics_exception(exc)
+                errors.append((status, detail))
+                if status in {"RATE_LIMITED", "AUTHENTICATION_ERROR", "BLOCKED"}:
+                    break
                 continue
-            if matched:
-                return {
-                    "found": True,
-                    "source": "VK Topics",
-                    "url": topic["url"],
-                    "trackName": matched["title"],
-                    "artistName": matched["artist"],
-                    "identity_validated": True,
-                    "source_confidence": 30,
-                    "format": "plain",
-                    "syncType": "none",
-                    "providerRaw": matched["text"],
-                    "rawLyrics": matched["text"],
-                    "plainLyrics": matched["text"],
-                    "syncedLyrics": "",
-                    "enhancedLyrics": "",
-                }
     except (OSError, ValueError, TypeError) as exc:
         status, detail = classify_lyrics_exception(exc)
         errors.append((status, detail))
 
-    if errors:
-        severity = {
-            "AUTHENTICATION_ERROR": 7,
-            "BLOCKED": 6,
-            "RATE_LIMITED": 5,
-            "TRANSIENT_ERROR": 4,
-            "PARSER_ERROR": 3,
-            "INVALID_RESPONSE": 2,
-        }
-        status, detail = max(errors, key=lambda item: severity.get(item[0], 0))
-        return {"source": "VK Topics", "acquisition_status": status, "error": detail}
+    if acquired_forms or errors:
+        return _collected_lyrics_result(
+            acquired_forms, errors, source="VK Topics", truncated=len(topics) > 3 if acquired_forms else False
+        )
     mark_provider_not_found()
     return {"source": "VK Topics", "acquisition_status": "NOT_FOUND"}
 
@@ -5081,8 +5231,6 @@ def fetch_deezer_lyrics(
                 duration,
             ):
                 continue
-            if album and album_data.get("title") and text_similarity(str(album_data["title"]), album) < 0.55:
-                continue
             matching.append(item)
         if not matching:
             mark_provider_not_found()
@@ -5116,104 +5264,135 @@ def fetch_deezer_lyrics(
         if not isinstance(jwt, str) or not jwt:
             raise _LyricsAcquisitionError("AUTHENTICATION_ERROR", "Deezer session renewal returned no JWT")
         results: list[dict[str, Any]] = []
+        item_failures: list[tuple[str, str]] = []
         for item in matching[:3]:
-            track_id = str(item.get("id") or "")
-            if not track_id:
-                raise ValueError("Deezer matched track has no ID")
-            payload = {
-                "operationName": "GetLyrics",
-                "variables": {"trackId": track_id},
-                "query": "query GetLyrics($trackId: String!) { track(trackId: $trackId) { id lyrics { id text synchronizedWordByWordLines { start end words { start end word } } synchronizedLines { lrcTimestamp line lineTranslated milliseconds duration } licence copyright writers } } }",
-            }
-            lyric_request = urllib.request.Request(
-                "https://pipe.deezer.com/api",
-                data=json.dumps(payload).encode("utf-8"),
-                method="POST",
-                headers={
-                    **headers,
-                    "Authorization": f"Bearer {jwt}",
-                    "Content-Type": "application/json",
-                    "Origin": "https://www.deezer.com",
-                },
-            )
-            body = request_json(lyric_request)
-            if not isinstance(body, dict) or not isinstance(body.get("data"), dict):
-                raise TypeError("Deezer lyrics GraphQL schema changed")
-            if body.get("errors"):
-                raise _LyricsAcquisitionError("INVALID_RESPONSE", "Deezer lyrics GraphQL returned errors")
-            track_data = body["data"].get("track")
-            if not isinstance(track_data, dict) or str(track_data.get("id") or "") != track_id:
-                raise ValueError("Deezer lyrics track ID differs from catalog result")
-            lyrics = track_data.get("lyrics")
-            if lyrics is None:
-                continue
-            if not isinstance(lyrics, dict):
-                raise TypeError("Deezer lyrics schema changed")
-            plain = str(lyrics.get("text") or "")
-            line_rows = lyrics.get("synchronizedLines") or []
-            word_rows = lyrics.get("synchronizedWordByWordLines") or []
-            if not isinstance(line_rows, list) or not isinstance(word_rows, list):
-                raise TypeError("Deezer synchronized lyric schema changed")
-            timed: list[str] = []
-            enhanced: list[str] = []
-            translations: list[str] = []
-            for row in line_rows:
-                if not isinstance(row, dict):
-                    raise TypeError("Deezer synchronized line schema changed")
-                stamp = row.get("milliseconds")
-                if stamp is None:
-                    raise ValueError("Deezer synchronized line lacks milliseconds")
-                ms = int(stamp)
-                if ms < 0:
-                    raise ValueError("Deezer synchronized line has negative time")
-                timed.append(f"[{ms_to_lrc_ts(ms)}]{row.get('line') or ''}")
-                if row.get("lineTranslated"):
-                    translations.append(str(row["lineTranslated"]))
-            for row in word_rows:
-                if not isinstance(row, dict) or not isinstance(row.get("words"), list):
-                    raise TypeError("Deezer word timing schema changed")
-                start = int(row["start"])
-                words = []
-                for word in row["words"]:
-                    if not isinstance(word, dict) or "start" not in word or "word" not in word:
-                        raise ValueError("Deezer word entry schema changed")
-                    words.append(f"<{ms_to_lrc_ts(int(word['start']))}>{word['word']}")
-                enhanced.append(f"[{ms_to_lrc_ts(start)}]" + "".join(words))
-            if not plain.strip() and timed:
-                plain = "\n".join(str(row.get("line") or "") for row in line_rows)
-            if not plain.strip():
-                continue
-            album_data = item.get("album") or {}
-            artist_data = item.get("artist") or {}
-            results.append(
-                {
-                    "found": True,
-                    "source": "Deezer",
-                    "id": track_id,
-                    "provider_track_id": track_id,
-                    "trackName": str(item.get("title") or ""),
-                    "artistName": str(artist_data.get("name") or ""),
-                    "albumName": str(album_data.get("title") or ""),
-                    "duration": item.get("duration"),
-                    "isrc": str(item.get("isrc") or ""),
-                    "identity_validated": True,
-                    "source_confidence": 80,
-                    "providerRaw": json.dumps(body, ensure_ascii=False),
-                    "rawLyrics": plain,
-                    "plainLyrics": plain,
-                    "syncedLyrics": "\n".join(timed),
-                    "enhancedLyrics": "\n".join(enhanced),
-                    "translationLyrics": "\n".join(translations),
-                    "ttmlLyrics": "",
-                    "format": "enhanced_lrc" if enhanced else "lrc" if timed else "plain",
-                    "syncType": "richsync" if enhanced else "linesync" if timed else "none",
-                    "has_word_sync": bool(enhanced),
-                    "attribution": str(lyrics.get("licence") or "Deezer"),
+            try:
+                track_id = str(item.get("id") or "")
+                if not track_id:
+                    raise ValueError("Deezer matched track has no ID")
+                payload = {
+                    "operationName": "GetLyrics",
+                    "variables": {"trackId": track_id},
+                    "query": "query GetLyrics($trackId: String!) { track(trackId: $trackId) { id lyrics { id text synchronizedWordByWordLines { start end words { start end word } } synchronizedLines { lrcTimestamp line lineTranslated milliseconds duration } licence copyright writers } } }",
                 }
-            )
+                lyric_request = urllib.request.Request(
+                    "https://pipe.deezer.com/api",
+                    data=json.dumps(payload).encode("utf-8"),
+                    method="POST",
+                    headers={
+                        **headers,
+                        "Authorization": f"Bearer {jwt}",
+                        "Content-Type": "application/json",
+                        "Origin": "https://www.deezer.com",
+                    },
+                )
+                body = request_json(lyric_request)
+                if not isinstance(body, dict) or not isinstance(body.get("data"), dict):
+                    raise TypeError("Deezer lyrics GraphQL schema changed")
+                if body.get("errors"):
+                    raise _LyricsAcquisitionError("INVALID_RESPONSE", "Deezer lyrics GraphQL returned errors")
+                track_data = body["data"].get("track")
+                if not isinstance(track_data, dict) or str(track_data.get("id") or "") != track_id:
+                    raise ValueError("Deezer lyrics track ID differs from catalog result")
+                lyrics = track_data.get("lyrics")
+                if lyrics is None:
+                    continue
+                if not isinstance(lyrics, dict):
+                    raise TypeError("Deezer lyrics schema changed")
+                plain = str(lyrics.get("text") or "")
+                line_rows = lyrics.get("synchronizedLines") or []
+                word_rows = lyrics.get("synchronizedWordByWordLines") or []
+                warnings: list[str] = []
+                if not isinstance(line_rows, list):
+                    warnings.append("Deezer line timing schema changed; plain text retained")
+                    line_rows = []
+                if not isinstance(word_rows, list):
+                    warnings.append("Deezer word timing schema changed; other forms retained")
+                    word_rows = []
+                timed: list[str] = []
+                enhanced: list[str] = []
+                translations: list[str] = []
+                try:
+                    for row in line_rows:
+                        if not isinstance(row, dict):
+                            raise TypeError("Deezer synchronized line schema changed")
+                        stamp = row.get("milliseconds")
+                        if stamp is None:
+                            raise ValueError("Deezer synchronized line lacks milliseconds")
+                        ms = int(stamp)
+                        if ms < 0:
+                            raise ValueError("Deezer synchronized line has negative time")
+                        timed.append(f"[{ms_to_lrc_ts(ms)}]{row.get('line') or ''}")
+                        if row.get("lineTranslated"):
+                            translations.append(str(row["lineTranslated"]))
+                except (ValueError, TypeError, KeyError, OverflowError) as exc:
+                    timed = []
+                    translations = []
+                    warnings.append(f"Deezer line timing rejected: {exc}; other forms retained")
+                try:
+                    for row in word_rows:
+                        if not isinstance(row, dict) or not isinstance(row.get("words"), list):
+                            raise TypeError("Deezer word timing schema changed")
+                        start = int(row["start"])
+                        words = []
+                        for word in row["words"]:
+                            if not isinstance(word, dict) or "start" not in word or "word" not in word:
+                                raise ValueError("Deezer word entry schema changed")
+                            words.append(f"<{ms_to_lrc_ts(int(word['start']))}>{word['word']}")
+                        enhanced.append(f"[{ms_to_lrc_ts(start)}]" + "".join(words))
+                except (ValueError, TypeError, KeyError, OverflowError) as exc:
+                    enhanced = []
+                    warnings.append(f"Deezer word timing rejected: {exc}; other forms retained")
+                if not plain.strip() and timed:
+                    plain = "\n".join(str(row.get("line") or "") for row in line_rows)
+                if not plain.strip():
+                    continue
+                album_data = item.get("album") or {}
+                artist_data = item.get("artist") or {}
+                results.append(
+                    {
+                        "found": True,
+                        "source": "Deezer",
+                        "id": track_id,
+                        "provider_track_id": track_id,
+                        "trackName": str(item.get("title") or ""),
+                        "artistName": str(artist_data.get("name") or ""),
+                        "albumName": str(album_data.get("title") or ""),
+                        "duration": item.get("duration"),
+                        "isrc": str(item.get("isrc") or ""),
+                        "identity_validated": True,
+                        "source_confidence": 80,
+                        "providerRaw": json.dumps(body, ensure_ascii=False),
+                        "rawLyrics": plain,
+                        "plainLyrics": plain,
+                        "syncedLyrics": "\n".join(timed),
+                        "enhancedLyrics": "\n".join(enhanced),
+                        "translationLyrics": "\n".join(translations),
+                        "ttmlLyrics": "",
+                        "format": "enhanced_lrc" if enhanced else "lrc" if timed else "plain",
+                        "syncType": "richsync" if enhanced else "linesync" if timed else "none",
+                        "has_word_sync": bool(enhanced),
+                        "validationWarnings": warnings,
+                        "attribution": str(lyrics.get("licence") or "Deezer"),
+                    }
+                )
+            except (OSError, ValueError, TypeError, KeyError, AttributeError, _LyricsAcquisitionError) as exc:
+                _record_provider_failure(exc)
+                status, detail = classify_lyrics_exception(exc)
+                item_failures.append((status, detail))
+                if status in {"RATE_LIMITED", "AUTHENTICATION_ERROR", "BLOCKED"}:
+                    break
+                continue
         if results:
+            if item_failures:
+                results[0].setdefault("validationWarnings", []).append(
+                    f"some recording candidates failed ({item_failures[0][0]})"
+                )
             results[0]["alternatives"] = results[1:]
             return results[0]
+        if item_failures:
+            status, detail = item_failures[0]
+            return {"source": "Deezer", "acquisition_status": status, "error": detail}
         mark_provider_not_found()
         return {"source": "Deezer", "acquisition_status": "NOT_FOUND"}
     except (OSError, ValueError, TypeError, KeyError, AttributeError, _LyricsAcquisitionError) as exc:
@@ -5227,6 +5406,8 @@ def fetch_amdm_lyrics(
     timeout: int = 6,
 ) -> dict[str, Any] | None:
     """Fetch a verified AmDm chord sheet while preserving source and vocal text."""
+    acquired_forms: list[dict[str, Any]] = []
+    item_failures: list[tuple[str, str]] = []
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     }
@@ -5244,50 +5425,58 @@ def fetch_amdm_lyrics(
             return {"source": "AmDm", "acquisition_status": "NOT_FOUND"}
         parser_errors: list[str] = []
         for item in matched[:2]:
-            track_url = item["url"]
             try:
-                treq = urllib.request.Request(track_url, headers=headers)
-                with _provider_urlopen(treq, timeout=timeout) as tresp:
-                    thtml = read_provider_text(tresp)
-                    final = (
-                        urllib.parse.urlparse(tresp.geturl())
-                        if callable(getattr(tresp, "geturl", None))
-                        else urllib.parse.urlparse(track_url)
+                track_url = item["url"]
+                try:
+                    treq = urllib.request.Request(track_url, headers=headers)
+                    with _provider_urlopen(treq, timeout=timeout) as tresp:
+                        thtml = read_provider_text(tresp)
+                        final = (
+                            urllib.parse.urlparse(tresp.geturl())
+                            if callable(getattr(tresp, "geturl", None))
+                            else urllib.parse.urlparse(track_url)
+                        )
+                    if final.scheme != "https" or final.hostname not in {"amdm.ru", "www.amdm.ru"}:
+                        raise _LyricsAcquisitionError("INVALID_RESPONSE", "redirect left provider host")
+                    raw_content = parse_amdm_lyrics(thtml)
+                except ValueError as exc:
+                    parser_errors.append(str(exc))
+                    continue
+                plain_content = _amdm_vocal_text(raw_content)
+                if len(clean_plain_lyrics_for_alignment(plain_content)) > 20:
+                    acquired_forms.append(
+                        {
+                            "found": True,
+                            "source": "AmDm",
+                            "id": item["id"],
+                            "provider_track_id": item["id"],
+                            "url": track_url,
+                            "trackName": item["title"],
+                            "artistName": item["artist"],
+                            "identity_validated": True,
+                            "source_confidence": 45,
+                            "format": "plain",
+                            "syncType": "none",
+                            "providerRaw": raw_content,
+                            "rawLyrics": raw_content,
+                            "plainLyrics": plain_content,
+                            "syncedLyrics": "",
+                            "enhancedLyrics": "",
+                            "ttmlLyrics": "",
+                            "transformations": [
+                                "chord-only rows omitted from display text; full chord sheet retained as source"
+                            ],
+                        }
                     )
-                if final.scheme != "https" or final.hostname not in {"amdm.ru", "www.amdm.ru"}:
-                    return {
-                        "source": "AmDm",
-                        "acquisition_status": "INVALID_RESPONSE",
-                        "error": "redirect left provider host",
-                    }
-                raw_content = parse_amdm_lyrics(thtml)
-            except ValueError as exc:
-                parser_errors.append(str(exc))
+            except (OSError, ValueError, TypeError, KeyError, AttributeError, _LyricsAcquisitionError) as exc:
+                _record_provider_failure(exc)
+                status, detail = classify_lyrics_exception(exc)
+                item_failures.append((status, detail))
+                if status in {"RATE_LIMITED", "AUTHENTICATION_ERROR", "BLOCKED"}:
+                    break
                 continue
-            plain_content = _amdm_vocal_text(raw_content)
-            if len(clean_plain_lyrics_for_alignment(plain_content)) > 20:
-                return {
-                    "found": True,
-                    "source": "AmDm",
-                    "id": item["id"],
-                    "provider_track_id": item["id"],
-                    "url": track_url,
-                    "trackName": item["title"],
-                    "artistName": item["artist"],
-                    "identity_validated": True,
-                    "source_confidence": 45,
-                    "format": "plain",
-                    "syncType": "none",
-                    "providerRaw": raw_content,
-                    "rawLyrics": raw_content,
-                    "plainLyrics": plain_content,
-                    "syncedLyrics": "",
-                    "enhancedLyrics": "",
-                    "ttmlLyrics": "",
-                    "transformations": [
-                        "chord-only rows omitted from display text; full chord sheet retained as source"
-                    ],
-                }
+        if acquired_forms or item_failures:
+            return _collected_lyrics_result(acquired_forms, item_failures, source="AmDm", truncated=len(matched) > 2)
         if parser_errors:
             error = ValueError(parser_errors[0])
             _record_provider_failure(error)
@@ -5417,6 +5606,8 @@ def fetch_bandcamp_lyrics(
     timeout: int = 6,
 ) -> dict[str, Any] | None:
     """Fetch lyrics from Bandcamp via mobile autocomplete API and data-tralbum / HTML parsing."""
+    acquired_forms: list[dict[str, Any]] = []
+    item_failures: list[tuple[str, str]] = []
     headers_api = {
         "User-Agent": "Bandcamp/2.6.2 (Android 14)",
         "Accept": "application/json",
@@ -5457,73 +5648,87 @@ def fetch_bandcamp_lyrics(
         return None
 
     for t_url, search_item in track_urls[:3]:
-        track_name = str(search_item.get("name") or search_item.get("title") or search_item.get("track_name") or "")
-        track_artist = str(search_item.get("band_name") or search_item.get("artist") or "")
-        if not track_name or not track_artist:
-            continue
         try:
-            treq = urllib.request.Request(t_url, headers=headers_web)
-            with _provider_urlopen(treq, timeout=min(timeout, 4)) as tresp:
-                thtml = read_provider_text(tresp)
+            track_name = str(search_item.get("name") or search_item.get("title") or search_item.get("track_name") or "")
+            track_artist = str(search_item.get("band_name") or search_item.get("artist") or "")
+            if not track_name or not track_artist:
+                continue
+            try:
+                treq = urllib.request.Request(t_url, headers=headers_web)
+                with _provider_urlopen(treq, timeout=min(timeout, 4)) as tresp:
+                    thtml = read_provider_text(tresp)
 
-                tr_data, semantic_lyrics = parse_bandcamp_lyrics_page(thtml)
-                if tr_data and isinstance(tr_data.get("trackinfo"), list):
-                    for item in tr_data["trackinfo"]:
-                        if not isinstance(item, dict):
-                            continue
-                        item_title = str(item.get("title") or track_name)
-                        item_lyrics = item.get("lyrics")
-                        if not isinstance(item_lyrics, str) or not item_lyrics.strip():
-                            continue
-                        if not is_track_match(item_title, track_artist, song, artist):
-                            continue
-                        parsed = html.unescape(item_lyrics).replace("\r\n", "\n").replace("\r", "\n")
-                        provider_id = str(item.get("track_id") or item.get("track_num") or t_url)
-                        return {
-                            "found": True,
-                            "source": "Bandcamp",
-                            "trackName": item_title,
-                            "artistName": track_artist,
-                            "albumName": str(tr_data.get("album_title") or ""),
-                            "duration": item.get("duration"),
-                            "id": provider_id,
-                            "provider_track_id": provider_id,
-                            "identity_validated": True,
-                            "url": t_url,
-                            "providerRaw": item_lyrics,
-                            "format": "plain",
-                            "syncType": "none",
-                            "has_word_sync": False,
-                            "has_back_vocals": False,
-                            "rawLyrics": parsed,
-                            "plainLyrics": parsed,
-                            "syncedLyrics": "",
-                            "enhancedLyrics": "",
-                            "ttmlLyrics": "",
-                        }
-                if semantic_lyrics.strip():
-                    parsed = semantic_lyrics.replace("\r\n", "\n").replace("\r", "\n")
-                    return {
-                        "found": True,
-                        "source": "Bandcamp",
-                        "trackName": track_name,
-                        "artistName": track_artist,
-                        "identity_validated": True,
-                        "url": t_url,
-                        "providerRaw": semantic_lyrics,
-                        "format": "plain",
-                        "syncType": "none",
-                        "has_word_sync": False,
-                        "has_back_vocals": False,
-                        "rawLyrics": parsed,
-                        "plainLyrics": parsed,
-                        "syncedLyrics": "",
-                        "enhancedLyrics": "",
-                        "ttmlLyrics": "",
-                    }
+                    tr_data, semantic_lyrics = parse_bandcamp_lyrics_page(thtml)
+                    if tr_data and isinstance(tr_data.get("trackinfo"), list):
+                        for item in tr_data["trackinfo"]:
+                            if not isinstance(item, dict):
+                                continue
+                            item_title = str(item.get("title") or track_name)
+                            item_lyrics = item.get("lyrics")
+                            if not isinstance(item_lyrics, str) or not item_lyrics.strip():
+                                continue
+                            if not is_track_match(item_title, track_artist, song, artist):
+                                continue
+                            parsed = html.unescape(item_lyrics).replace("\r\n", "\n").replace("\r", "\n")
+                            provider_id = str(item.get("track_id") or item.get("track_num") or t_url)
+                            acquired_forms.append(
+                                {
+                                    "found": True,
+                                    "source": "Bandcamp",
+                                    "trackName": item_title,
+                                    "artistName": track_artist,
+                                    "albumName": str(tr_data.get("album_title") or ""),
+                                    "duration": item.get("duration"),
+                                    "id": provider_id,
+                                    "provider_track_id": provider_id,
+                                    "identity_validated": True,
+                                    "url": t_url,
+                                    "providerRaw": item_lyrics,
+                                    "format": "plain",
+                                    "syncType": "none",
+                                    "has_word_sync": False,
+                                    "has_back_vocals": False,
+                                    "rawLyrics": parsed,
+                                    "plainLyrics": parsed,
+                                    "syncedLyrics": "",
+                                    "enhancedLyrics": "",
+                                    "ttmlLyrics": "",
+                                }
+                            )
+                    if semantic_lyrics.strip():
+                        parsed = semantic_lyrics.replace("\r\n", "\n").replace("\r", "\n")
+                        acquired_forms.append(
+                            {
+                                "found": True,
+                                "source": "Bandcamp",
+                                "trackName": track_name,
+                                "artistName": track_artist,
+                                "identity_validated": True,
+                                "url": t_url,
+                                "providerRaw": semantic_lyrics,
+                                "format": "plain",
+                                "syncType": "none",
+                                "has_word_sync": False,
+                                "has_back_vocals": False,
+                                "rawLyrics": parsed,
+                                "plainLyrics": parsed,
+                                "syncedLyrics": "",
+                                "enhancedLyrics": "",
+                                "ttmlLyrics": "",
+                            }
+                        )
 
-        except Exception:
-            pass
+            except Exception:
+                pass
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, _LyricsAcquisitionError) as exc:
+            _record_provider_failure(exc)
+            status, detail = classify_lyrics_exception(exc)
+            item_failures.append((status, detail))
+            if status in {"RATE_LIMITED", "AUTHENTICATION_ERROR", "BLOCKED"}:
+                break
+            continue
+    if acquired_forms or item_failures:
+        return _collected_lyrics_result(acquired_forms, item_failures, source="Bandcamp", truncated=len(track_urls) > 3)
 
     return None
 
@@ -5538,6 +5743,8 @@ def fetch_baidu_lyrics(
     Generic Baidu snippets previously supplied no recording identity and could
     silently attach unrelated lyrics. That fallback is intentionally removed.
     """
+    acquired_forms: list[dict[str, Any]] = []
+    item_failures: list[tuple[str, str]] = []
     query = f"{song} {artist}".strip()
     headers = {
         "User-Agent": "AudiophileArchTagger/6.0 (lyrics metadata client)",
@@ -5558,61 +5765,73 @@ def fetch_baidu_lyrics(
             return {"source": "1ting", "acquisition_status": "NOT_FOUND"}
         parser_errors: list[str] = []
         for candidate in candidates[:3]:
-            with _provider_urlopen(
-                urllib.request.Request(candidate["url"], headers=headers), timeout=min(timeout, 4)
-            ) as response:
-                page = _read_legacy_chinese_html(response)
-                final = (
-                    urllib.parse.urlparse(response.geturl())
-                    if callable(getattr(response, "geturl", None))
-                    else urllib.parse.urlparse(candidate["url"])
-                )
-            if final.scheme != "https" or final.hostname not in {"1ting.com", "www.1ting.com"}:
-                return {
-                    "source": "1ting",
-                    "acquisition_status": "INVALID_RESPONSE",
-                    "error": "redirect left provider host",
-                }
             try:
-                kind, provider_text = parse_1ting_lyrics(page)
-            except ValueError as exc:
-                parser_errors.append(str(exc))
+                with _provider_urlopen(
+                    urllib.request.Request(candidate["url"], headers=headers), timeout=min(timeout, 4)
+                ) as response:
+                    page = _read_legacy_chinese_html(response)
+                    final = (
+                        urllib.parse.urlparse(response.geturl())
+                        if callable(getattr(response, "geturl", None))
+                        else urllib.parse.urlparse(candidate["url"])
+                    )
+                if final.scheme != "https" or final.hostname not in {"1ting.com", "www.1ting.com"}:
+                    raise _LyricsAcquisitionError("INVALID_RESPONSE", "redirect left provider host")
+                try:
+                    kind, provider_text = parse_1ting_lyrics(page)
+                except ValueError as exc:
+                    parser_errors.append(str(exc))
+                    continue
+                common = {
+                    "id": candidate["id"],
+                    "provider_track_id": candidate["id"],
+                    "url": candidate["url"],
+                    "trackName": candidate["title"],
+                    "artistName": candidate["artist"],
+                    "identity_validated": True,
+                    "source_confidence": 48,
+                    "providerRaw": provider_text,
+                    "rawLyrics": provider_text,
+                }
+                if kind == "lrc" and ANY_LINE_TIMESTAMP_RE.search(provider_text):
+                    acquired_forms.append(
+                        {
+                            **common,
+                            "found": True,
+                            "source": "1ting (LRC)",
+                            "format": "lrc",
+                            "syncType": "linesync",
+                            "plainLyrics": to_plain(provider_text),
+                            "syncedLyrics": provider_text,
+                            "enhancedLyrics": "",
+                            "transformations": ["HTML entities decoded; LRC text and row order retained"],
+                        }
+                    )
+                if kind == "plain" and len(clean_plain_lyrics_for_alignment(provider_text)) > 20:
+                    acquired_forms.append(
+                        {
+                            **common,
+                            "found": True,
+                            "source": "1ting (plain)",
+                            "format": "plain",
+                            "syncType": "none",
+                            "plainLyrics": provider_text,
+                            "syncedLyrics": "",
+                            "enhancedLyrics": "",
+                        }
+                    )
+                parser_errors.append("1ting page had no usable lyrics content")
+            except (OSError, ValueError, TypeError, KeyError, AttributeError, _LyricsAcquisitionError) as exc:
+                _record_provider_failure(exc)
+                status, detail = classify_lyrics_exception(exc)
+                item_failures.append((status, detail))
+                if status in {"RATE_LIMITED", "AUTHENTICATION_ERROR", "BLOCKED"}:
+                    break
                 continue
-            common = {
-                "id": candidate["id"],
-                "provider_track_id": candidate["id"],
-                "url": candidate["url"],
-                "trackName": candidate["title"],
-                "artistName": candidate["artist"],
-                "identity_validated": True,
-                "source_confidence": 48,
-                "providerRaw": provider_text,
-                "rawLyrics": provider_text,
-            }
-            if kind == "lrc" and ANY_LINE_TIMESTAMP_RE.search(provider_text):
-                return {
-                    **common,
-                    "found": True,
-                    "source": "1ting (LRC)",
-                    "format": "lrc",
-                    "syncType": "linesync",
-                    "plainLyrics": to_plain(provider_text),
-                    "syncedLyrics": provider_text,
-                    "enhancedLyrics": "",
-                    "transformations": ["HTML entities decoded; LRC text and row order retained"],
-                }
-            if kind == "plain" and len(clean_plain_lyrics_for_alignment(provider_text)) > 20:
-                return {
-                    **common,
-                    "found": True,
-                    "source": "1ting (plain)",
-                    "format": "plain",
-                    "syncType": "none",
-                    "plainLyrics": provider_text,
-                    "syncedLyrics": "",
-                    "enhancedLyrics": "",
-                }
-            parser_errors.append("1ting page had no usable lyrics content")
+        if acquired_forms or item_failures:
+            return _collected_lyrics_result(
+                acquired_forms, item_failures, source="Baidu / 1ting", truncated=len(candidates) > 3
+            )
         if parser_errors:
             error = ValueError(parser_errors[0])
             _record_provider_failure(error)
@@ -5781,6 +6000,8 @@ def fetch_darklyrics(
     Index links identify albums, not tracks. Their labels are never used as
     song identity evidence; the individual song heading is matched instead.
     """
+    acquired_forms: list[dict[str, Any]] = []
+    item_failures: list[tuple[str, str]] = []
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -5850,56 +6071,68 @@ def fetch_darklyrics(
     valid_album_pages = 0
     for album_url, album_title in album_links:
         try:
-            album_req = urllib.request.Request(album_url, headers=headers)
-            with _provider_urlopen(album_req, timeout=timeout) as album_resp:
-                raw_album = album_resp.read(5_000_001)
-                if len(raw_album) > 5_000_000:
-                    parser_failures.append("album page exceeds 5 MB")
+            try:
+                album_req = urllib.request.Request(album_url, headers=headers)
+                with _provider_urlopen(album_req, timeout=timeout) as album_resp:
+                    raw_album = album_resp.read(5_000_001)
+                    if len(raw_album) > 5_000_000:
+                        parser_failures.append("album page exceeds 5 MB")
+                        continue
+                    album_html = decode_provider_text(album_resp, raw_album)
+            except Exception as exc:
+                status, error = failure_for(exc)
+                if status in {"BLOCKED", "RATE_LIMITED", "AUTHENTICATION_ERROR"}:
+                    return failed(status, error)
+                parser_failures.append(error)
+                continue
+            if any(marker in album_html.casefold() for marker in challenge_markers):
+                return failed("BLOCKED", "provider returned a challenge/access page")
+            parsed_songs = _parse_darklyrics_songs(album_html)
+            if not parsed_songs:
+                parser_failures.append("missing or changed DarkLyrics song container")
+                continue
+            valid_album_pages += 1
+            for _song_number, candidate_title, text in parsed_songs:
+                if not is_track_match(candidate_title, artist, song, artist):
                     continue
-                album_html = decode_provider_text(album_resp, raw_album)
-        except Exception as exc:
-            status, error = failure_for(exc)
-            if status in {"BLOCKED", "RATE_LIMITED", "AUTHENTICATION_ERROR"}:
-                return failed(status, error)
-            parser_failures.append(error)
+                if len(text.strip()) < 10:
+                    parser_failures.append("matched song heading had an empty lyrics body")
+                    continue
+                if len(text) > 100_000:
+                    return failed("INVALID_RESPONSE", "lyrics body exceeds 100 KB")
+                acquired_forms.append(
+                    {
+                        "found": True,
+                        "source": "DarkLyrics",
+                        "id": album_url,
+                        "provider_track_id": album_url,
+                        "url": album_url,
+                        "trackName": candidate_title,
+                        "artistName": artist,
+                        "albumName": album_title,
+                        "identity_validated": True,
+                        "source_confidence": 70,
+                        "providerRaw": text,
+                        "rawLyrics": text,
+                        "format": "plain",
+                        "syncType": "none",
+                        "has_word_sync": False,
+                        "has_back_vocals": False,
+                        "plainLyrics": text,
+                        "syncedLyrics": "",
+                        "enhancedLyrics": "",
+                        "ttmlLyrics": "",
+                    }
+                )
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, _LyricsAcquisitionError) as exc:
+            _record_provider_failure(exc)
+            status, detail = classify_lyrics_exception(exc)
+            item_failures.append((status, detail))
+            if status in {"RATE_LIMITED", "AUTHENTICATION_ERROR", "BLOCKED"}:
+                break
             continue
-        if any(marker in album_html.casefold() for marker in challenge_markers):
-            return failed("BLOCKED", "provider returned a challenge/access page")
-        parsed_songs = _parse_darklyrics_songs(album_html)
-        if not parsed_songs:
-            parser_failures.append("missing or changed DarkLyrics song container")
-            continue
-        valid_album_pages += 1
-        for _song_number, candidate_title, text in parsed_songs:
-            if not is_track_match(candidate_title, artist, song, artist):
-                continue
-            if len(text.strip()) < 10:
-                parser_failures.append("matched song heading had an empty lyrics body")
-                continue
-            if len(text) > 100_000:
-                return failed("INVALID_RESPONSE", "lyrics body exceeds 100 KB")
-            return {
-                "found": True,
-                "source": "DarkLyrics",
-                "id": album_url,
-                "provider_track_id": album_url,
-                "url": album_url,
-                "trackName": candidate_title,
-                "artistName": artist,
-                "albumName": album_title,
-                "identity_validated": True,
-                "source_confidence": 70,
-                "providerRaw": text,
-                "rawLyrics": text,
-                "format": "plain",
-                "syncType": "none",
-                "has_word_sync": False,
-                "has_back_vocals": False,
-                "plainLyrics": text,
-                "syncedLyrics": "",
-                "enhancedLyrics": "",
-                "ttmlLyrics": "",
-            }
+    if acquired_forms or item_failures:
+        return _collected_lyrics_result(acquired_forms, item_failures, source="DarkLyrics")
 
     if parser_failures:
         status = (
@@ -6090,6 +6323,8 @@ def fetch_metal_archives(
     timeout: int = 6,
 ) -> dict[str, Any] | None:
     """Use the provider's AJAX search and verify both song and band before lookup."""
+    acquired_forms: list[dict[str, Any]] = []
+    item_failures: list[tuple[str, str]] = []
     headers = {
         "User-Agent": "AudiophileArchTagger/6.0 (lyrics lookup; contact through project repository)",
         "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -6129,59 +6364,65 @@ def fetch_metal_archives(
         rows = []
 
     for match in rows[:10]:
-        lyric_id = match["id"]
-        view_url = f"https://www.metal-archives.com/release/ajax-view-lyrics/id/{_quote_component(lyric_id)}"
         try:
-            view_request = urllib.request.Request(view_url, headers=headers)
-            with _provider_urlopen(view_request, timeout=min(timeout, 5)) as response:
-                page_raw = response.read(500_001)
-                if len(page_raw) > 500_000:
-                    return {
-                        "source": "Metal-Archives",
-                        "acquisition_status": "INVALID_RESPONSE",
-                        "error": "lyrics response exceeds 500 KB",
-                    }
-                page = decode_provider_text(response, page_raw)
-            if any(
-                marker in page.casefold()
-                for marker in ("captcha", "access denied", "cloudflare", "temporarily blocked")
-            ):
-                return {
+            lyric_id = match["id"]
+            view_url = f"https://www.metal-archives.com/release/ajax-view-lyrics/id/{_quote_component(lyric_id)}"
+            try:
+                view_request = urllib.request.Request(view_url, headers=headers)
+                with _provider_urlopen(view_request, timeout=min(timeout, 5)) as response:
+                    page_raw = response.read(500_001)
+                    if len(page_raw) > 500_000:
+                        raise _LyricsAcquisitionError("INVALID_RESPONSE", "lyrics response exceeds 500 KB")
+                    page = decode_provider_text(response, page_raw)
+                if any(
+                    marker in page.casefold()
+                    for marker in ("captcha", "access denied", "cloudflare", "temporarily blocked")
+                ):
+                    raise _LyricsAcquisitionError("BLOCKED", "provider returned a block/challenge page")
+                lyrics = parse_metal_archives_lyrics_page(page)
+            except Exception as exc:
+                status, error = classify_lyrics_exception(exc)
+                if status in {"BLOCKED", "RATE_LIMITED", "TRANSIENT_ERROR", "AUTHENTICATION_ERROR"}:
+                    raise _LyricsAcquisitionError(status, error)
+                parser_errors.append(error)
+                continue
+            if "lyrics not available" in lyrics.casefold() or len(lyrics.strip()) < 20:
+                continue
+            acquired_forms.append(
+                {
+                    "found": True,
                     "source": "Metal-Archives",
-                    "acquisition_status": "BLOCKED",
-                    "error": "provider returned a block/challenge page",
+                    "id": lyric_id,
+                    "provider_track_id": lyric_id,
+                    "url": view_url,
+                    "trackName": match["title"],
+                    "artistName": match["artist"],
+                    "albumName": match["album"],
+                    "identity_validated": True,
+                    "source_confidence": 64,
+                    "format": "plain",
+                    "syncType": "none",
+                    "has_word_sync": False,
+                    "has_back_vocals": False,
+                    "providerRaw": lyrics,
+                    "rawLyrics": lyrics,
+                    "plainLyrics": lyrics,
+                    "syncedLyrics": "",
+                    "enhancedLyrics": "",
+                    "ttmlLyrics": "",
                 }
-            lyrics = parse_metal_archives_lyrics_page(page)
-        except Exception as exc:
-            status, error = classify_lyrics_exception(exc)
-            if status in {"BLOCKED", "RATE_LIMITED", "TRANSIENT_ERROR", "AUTHENTICATION_ERROR"}:
-                return {"source": "Metal-Archives", "acquisition_status": status, "error": error}
-            parser_errors.append(error)
+            )
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, _LyricsAcquisitionError) as exc:
+            _record_provider_failure(exc)
+            status, detail = classify_lyrics_exception(exc)
+            item_failures.append((status, detail))
+            if status in {"RATE_LIMITED", "AUTHENTICATION_ERROR", "BLOCKED"}:
+                break
             continue
-        if "lyrics not available" in lyrics.casefold() or len(lyrics.strip()) < 20:
-            continue
-        return {
-            "found": True,
-            "source": "Metal-Archives",
-            "id": lyric_id,
-            "provider_track_id": lyric_id,
-            "url": view_url,
-            "trackName": match["title"],
-            "artistName": match["artist"],
-            "albumName": match["album"],
-            "identity_validated": True,
-            "source_confidence": 64,
-            "format": "plain",
-            "syncType": "none",
-            "has_word_sync": False,
-            "has_back_vocals": False,
-            "providerRaw": lyrics,
-            "rawLyrics": lyrics,
-            "plainLyrics": lyrics,
-            "syncedLyrics": "",
-            "enhancedLyrics": "",
-            "ttmlLyrics": "",
-        }
+    if acquired_forms or item_failures:
+        return _collected_lyrics_result(
+            acquired_forms, item_failures, source="Metal-Archives", truncated=len(rows) > 10
+        )
     if parser_errors:
         return {"source": "Metal-Archives", "acquisition_status": "PARSER_ERROR", "error": parser_errors[0]}
     if valid_search:
@@ -6535,6 +6776,8 @@ def parse_tekstowo_lyrics(page: str) -> tuple[str, str]:
 
 def fetch_tekstowo(song: str, artist: str, timeout: int = 6) -> dict[str, Any] | None:
     """Fetch lyrics only after matching title and artist in semantic search results."""
+    acquired_forms: list[dict[str, Any]] = []
+    item_failures: list[tuple[str, str]] = []
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
         "Accept": "text/html,application/xhtml+xml",
@@ -6550,51 +6793,61 @@ def fetch_tekstowo(song: str, artist: str, timeout: int = 6) -> dict[str, Any] |
 
     parser_errors: list[str] = []
     for item in matched[:5]:
-        detail_url, matched_title, matched_artist = item["url"], item["title"], item["artist"]
-        request = urllib.request.Request(detail_url, headers=headers)
-        with _provider_urlopen(request, timeout=timeout) as response:
-            page = read_provider_text(response)
-            final_url = (
-                urllib.parse.urlparse(response.geturl())
-                if callable(getattr(response, "geturl", None))
-                else urllib.parse.urlparse(detail_url)
-            )
-        if final_url.scheme != "https" or final_url.hostname not in {"tekstowo.pl", "www.tekstowo.pl"}:
-            return {
-                "source": "Tekstowo.pl",
-                "acquisition_status": "INVALID_RESPONSE",
-                "error": "redirect left provider host",
-            }
         try:
-            raw_markup, raw_text = parse_tekstowo_lyrics(page)
-        except ValueError as exc:
-            parser_errors.append(str(exc))
+            detail_url, matched_title, matched_artist = item["url"], item["title"], item["artist"]
+            request = urllib.request.Request(detail_url, headers=headers)
+            with _provider_urlopen(request, timeout=timeout) as response:
+                page = read_provider_text(response)
+                final_url = (
+                    urllib.parse.urlparse(response.geturl())
+                    if callable(getattr(response, "geturl", None))
+                    else urllib.parse.urlparse(detail_url)
+                )
+            if final_url.scheme != "https" or final_url.hostname not in {"tekstowo.pl", "www.tekstowo.pl"}:
+                raise _LyricsAcquisitionError("INVALID_RESPONSE", "redirect left provider host")
+            try:
+                raw_markup, raw_text = parse_tekstowo_lyrics(page)
+            except ValueError as exc:
+                parser_errors.append(str(exc))
+                continue
+            parsed_text = "\n".join(
+                line for line in raw_text.split("\n") if line.strip().casefold() != "(tekst piosenki)"
+            )
+            if len(parsed_text.strip()) < 20:
+                parser_errors.append("Tekstowo lyrics container is empty or implausibly short")
+                continue
+            acquired_forms.append(
+                {
+                    "found": True,
+                    "source": "Tekstowo.pl",
+                    "id": detail_url.rsplit("/", 1)[-1],
+                    "provider_track_id": detail_url,
+                    "url": detail_url,
+                    "trackName": matched_title,
+                    "artistName": matched_artist,
+                    "identity_validated": True,
+                    "source_confidence": 64,
+                    "format": "plain",
+                    "syncType": "none",
+                    "has_word_sync": False,
+                    "has_back_vocals": False,
+                    "providerRaw": raw_markup,
+                    "rawLyrics": raw_text,
+                    "plainLyrics": parsed_text,
+                    "syncedLyrics": "",
+                    "enhancedLyrics": "",
+                    "ttmlLyrics": "",
+                }
+            )
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, _LyricsAcquisitionError) as exc:
+            _record_provider_failure(exc)
+            status, detail = classify_lyrics_exception(exc)
+            item_failures.append((status, detail))
+            if status in {"RATE_LIMITED", "AUTHENTICATION_ERROR", "BLOCKED"}:
+                break
             continue
-        parsed_text = "\n".join(line for line in raw_text.split("\n") if line.strip().casefold() != "(tekst piosenki)")
-        if len(parsed_text.strip()) < 20:
-            parser_errors.append("Tekstowo lyrics container is empty or implausibly short")
-            continue
-        return {
-            "found": True,
-            "source": "Tekstowo.pl",
-            "id": detail_url.rsplit("/", 1)[-1],
-            "provider_track_id": detail_url,
-            "url": detail_url,
-            "trackName": matched_title,
-            "artistName": matched_artist,
-            "identity_validated": True,
-            "source_confidence": 64,
-            "format": "plain",
-            "syncType": "none",
-            "has_word_sync": False,
-            "has_back_vocals": False,
-            "providerRaw": raw_markup,
-            "rawLyrics": raw_text,
-            "plainLyrics": parsed_text,
-            "syncedLyrics": "",
-            "enhancedLyrics": "",
-            "ttmlLyrics": "",
-        }
+    if acquired_forms or item_failures:
+        return _collected_lyrics_result(acquired_forms, item_failures, source="Tekstowo.pl", truncated=len(matched) > 5)
     return {"source": "Tekstowo.pl", "acquisition_status": "PARSER_ERROR", "error": parser_errors[0]}
 
 
@@ -6621,6 +6874,8 @@ def _unison_item_to_candidate(
     if not isinstance(raw_value, str) or not raw_value.strip():
         return None
     raw = raw_value
+    title = str(item.get("song") or item.get("trackName") or title)
+    artist = str(item.get("artist") or item.get("artistName") or artist)
     native_ttml = is_ttml(raw) or str(item.get("format") or "").casefold() == "ttml"
     warnings: list[str] = []
     plain = ""
@@ -6673,6 +6928,8 @@ def _unison_item_to_candidate(
         "version": str(item.get("version") or item.get("versionName") or ""),
         "duration": duration_value,
         "language": language,
+        "isrc": str(item.get("isrc") or ""),
+        "recording_id": str(item.get("recording_id") or item.get("musicbrainz_recording_id") or ""),
         "identity_validated": bool(title and artist and is_track_match(title, artist, query_song, query_artist)),
         "format": "ttml" if native_ttml else ("elrc" if has_words else ("lrc" if synced else "plain")),
         "syncType": "richsync" if has_words else ("linesync" if synced else "none"),
@@ -6707,6 +6964,7 @@ def fetch_apple_music_ttml(
     """
     headers = {"User-Agent": "AudiophileArchTagger/6.0 (UnisonClient)", "Accept": "application/json"}
 
+    candidates: list[dict[str, Any]] = []
     # 1. Search Unison API candidates
     search_q = f"{artist} {song}".strip()
     s_url = f"https://unison.boidu.dev/lyrics/search?q={_quote_component(search_q)}"
@@ -6724,9 +6982,10 @@ def fetch_apple_music_ttml(
             if not isinstance(s_data, dict) or not isinstance(s_data.get("data"), list):
                 raise TypeError("Unison search response has no data array")
             items = s_data["data"]
-            for item in items:
+            for item in items[:20]:
                 if not isinstance(item, dict):
-                    raise TypeError("Unison search response contains a non-object item")
+                    _record_provider_failure(TypeError("Unison search response contains a non-object item"))
+                    continue
                 t_cand = item.get("song", "")
                 a_cand = item.get("artist", "")
                 if is_track_match(t_cand, a_cand, song, artist):
@@ -6735,39 +6994,47 @@ def fetch_apple_music_ttml(
                     f_url = (
                         f"https://unison.boidu.dev/lyrics?v={vid}" if vid else f"https://unison.boidu.dev/lyrics/{lid}"
                     )
-                    with _provider_urlopen(urllib.request.Request(f_url, headers=headers), timeout=timeout) as lresp:
-                        final = urllib.parse.urlparse(
-                            lresp.geturl() if callable(getattr(lresp, "geturl", None)) else f_url
-                        )
-                        if final.scheme != "https" or final.hostname != "unison.boidu.dev":
-                            return {
-                                "source": "Unison",
-                                "acquisition_status": "INVALID_RESPONSE",
-                                "error": "lyrics redirect left the Unison provider host",
-                            }
-                        ldata = _provider_json_loads(read_provider_text(lresp))
-                        if (
-                            not isinstance(ldata, dict)
-                            or not ldata.get("success")
-                            or not isinstance(ldata.get("data"), dict)
-                        ):
-                            raise ValueError("Unison lyrics response has an unexpected schema")
-                        litem = ldata["data"]
-                        if not isinstance(litem.get("lyrics"), str):
-                            raise TypeError("Unison lyrics item has no text field")
-                        candidate = _unison_item_to_candidate(litem, song, artist, t_cand, a_cand)
-                        if candidate:
-                            candidate["identity_validated"] = True
-                            candidate["searchIdentityValidated"] = True
-                            candidate["url"] = f_url
-                            return candidate
-                        mark_provider_not_found()
+                    try:
+                        with _provider_urlopen(
+                            urllib.request.Request(f_url, headers=headers), timeout=timeout
+                        ) as lresp:
+                            final = urllib.parse.urlparse(
+                                lresp.geturl() if callable(getattr(lresp, "geturl", None)) else f_url
+                            )
+                            if final.scheme != "https" or final.hostname != "unison.boidu.dev":
+                                raise ValueError("lyrics redirect left the Unison provider host")
+                            ldata = _provider_json_loads(read_provider_text(lresp))
+                            if (
+                                not isinstance(ldata, dict)
+                                or not ldata.get("success")
+                                or not isinstance(ldata.get("data"), dict)
+                            ):
+                                raise ValueError("Unison lyrics response has an unexpected schema")
+                            litem = ldata["data"]
+                            if not isinstance(litem.get("lyrics"), str):
+                                raise TypeError("Unison lyrics item has no text field")
+                            candidate = _unison_item_to_candidate(litem, song, artist, t_cand, a_cand)
+                            if candidate:
+                                candidate["searchIdentityValidated"] = True
+                                candidate["url"] = f_url
+                                candidates.append(candidate)
+                            if candidate is None:
+                                mark_provider_not_found()
+                    except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
+                        _record_provider_failure(exc)
             # A valid search response with no exact artist/title match is
             # trustworthy no-result evidence, while the direct endpoint below
             # still gets its independent chance.
             mark_provider_not_found()
     except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
         _record_provider_failure(exc)
+
+    if candidates:
+        selected = dict(candidates[0])
+        selected["alternatives"] = candidates[1:]
+        if len(items) > 20:
+            selected.setdefault("validationWarnings", []).append("Unison search truncated to 20 items")
+        return selected
 
     # 2. Direct endpoint fallback
     params: dict[str, str] = {"song": song.strip(), "artist": artist.strip()}
@@ -7148,6 +7415,8 @@ def fetch_genius(
     """Fetch high-quality clean plain text lyrics from Genius."""
     acquisition_failures: list[tuple[str, str]] = []
     had_valid_search = False
+    candidates: list[dict[str, Any]] = []
+    seen_pages: set[str] = set()
     queries = [
         f"{artist} {song}".strip(),
         f"{cyrillic_to_latin(artist)} {song}".strip(),
@@ -7190,65 +7459,81 @@ def fetch_genius(
                             if h.get("type") == "song" or "title" in h.get("result", {}):
                                 hits.append(h)
 
-                cand_url = None
-                cand_title = ""
-                cand_artist = ""
-                cand_album = ""
-                cand_duration: float | None = None
-                for h in hits:
-                    res = h.get("result", {})
-                    title = res.get("title", "")
-                    primary_artist = res.get("primary_artist", {}).get("name", "")
-                    if is_track_match(title, primary_artist, song, artist):
-                        cand_url = res.get("url")
-                        cand_title = str(title or "")
-                        cand_artist = str(primary_artist or "")
-                        album_info = res.get("primary_album")
-                        cand_album = str(album_info.get("name") or "") if isinstance(album_info, dict) else ""
-                        try:
-                            cand_duration = float(res["duration_ms"]) / 1000 if res.get("duration_ms") else None
-                        except (TypeError, ValueError):
-                            cand_duration = None
-                        break
-
-                if not cand_url:
-                    continue
-
-                page_req = urllib.request.Request(cand_url, headers=page_headers)
-                with _provider_urlopen(page_req, timeout=timeout) as page_resp:
-                    raw_page = page_resp.read(5_000_001)
-                    if len(raw_page) > 5_000_000:
-                        acquisition_failures.append(("INVALID_RESPONSE", "lyrics page exceeds 5 MB"))
-                        continue
-                page_html = decode_provider_text(page_resp, raw_page)
-                lyr = extract_genius_lyrics(page_html)
-                if lyr:
-                    if return_candidate:
-                        return {
-                            "found": True,
-                            "source": "Genius",
-                            "url": cand_url,
-                            "id": str(res.get("id") or ""),
-                            "provider_track_id": str(res.get("id") or ""),
-                            "trackName": cand_title,
-                            "artistName": cand_artist,
-                            "albumName": cand_album,
-                            "duration": cand_duration,
-                            "language": str(res.get("language") or ""),
-                            "identity_validated": bool(cand_title and cand_artist),
-                            "providerRaw": lyr,
-                            "rawLyrics": lyr,
-                            "plainLyrics": lyr,
-                            "syncedLyrics": "",
-                        }
-                    return lyr
-                challenge_markers = ("captcha", "verify you are human", "access denied", "unusual traffic")
-                if any(marker in page_html.casefold() for marker in challenge_markers):
-                    acquisition_failures.append(("BLOCKED", "Genius returned a challenge/access page"))
-                else:
-                    acquisition_failures.append(
-                        ("PARSER_ERROR", "matched Genius page had no recognized lyrics container")
+                matching = [
+                    h.get("result", {})
+                    for h in hits
+                    if is_track_match(
+                        h.get("result", {}).get("title", ""),
+                        h.get("result", {}).get("primary_artist", {}).get("name", ""),
+                        song,
+                        artist,
                     )
+                ]
+                if len(matching) > 20:
+                    acquisition_failures.append(("TRUNCATED", "Genius matching candidates limited to 20"))
+                for res in matching[:20]:
+                    cand_url = str(res.get("url") or "")
+                    if not cand_url or cand_url in seen_pages:
+                        continue
+                    parsed_url = urllib.parse.urlparse(cand_url)
+                    if parsed_url.scheme != "https" or parsed_url.hostname not in {"genius.com", "www.genius.com"}:
+                        acquisition_failures.append(("INVALID_RESPONSE", "unexpected Genius lyrics URL"))
+                        continue
+                    seen_pages.add(cand_url)
+                    cand_title = str(res.get("title") or "")
+                    cand_artist = str(res.get("primary_artist", {}).get("name") or "")
+                    album_info = res.get("primary_album")
+                    cand_album = str(album_info.get("name") or "") if isinstance(album_info, dict) else ""
+                    try:
+                        cand_duration = float(res["duration_ms"]) / 1000 if res.get("duration_ms") else None
+                    except (TypeError, ValueError):
+                        cand_duration = None
+                    try:
+                        page_req = urllib.request.Request(cand_url, headers=page_headers)
+                        with _provider_urlopen(page_req, timeout=timeout) as page_resp:
+                            raw_page = page_resp.read(5_000_001)
+                            if len(raw_page) > 5_000_000:
+                                acquisition_failures.append(("INVALID_RESPONSE", "lyrics page exceeds 5 MB"))
+                                continue
+                        page_html = decode_provider_text(page_resp, raw_page)
+                        lyr = extract_genius_lyrics(page_html)
+                        if lyr:
+                            if return_candidate:
+                                candidates.append(
+                                    {
+                                        "found": True,
+                                        "source": "Genius",
+                                        "url": cand_url,
+                                        "id": str(res.get("id") or ""),
+                                        "provider_track_id": str(res.get("id") or ""),
+                                        "trackName": cand_title,
+                                        "artistName": cand_artist,
+                                        "albumName": cand_album,
+                                        "duration": cand_duration,
+                                        "language": str(res.get("language") or ""),
+                                        "identity_validated": bool(cand_title and cand_artist),
+                                        "providerRaw": page_html,
+                                        "rawLyrics": lyr,
+                                        "plainLyrics": lyr,
+                                        "syncedLyrics": "",
+                                    }
+                                )
+                                continue
+                            return lyr
+                        challenge_markers = ("captcha", "verify you are human", "access denied", "unusual traffic")
+                        if any(marker in page_html.casefold() for marker in challenge_markers):
+                            acquisition_failures.append(("BLOCKED", "Genius returned a challenge/access page"))
+                        else:
+                            acquisition_failures.append(
+                                ("PARSER_ERROR", "matched Genius page had no recognized lyrics container")
+                            )
+                    except (OSError, ValueError, UnicodeError, LookupError) as exc:
+                        status, detail = classify_lyrics_exception(exc)
+                        acquisition_failures.append((status, detail))
+                        if status in {"RATE_LIMITED", "AUTHENTICATION_ERROR", "BLOCKED"}:
+                            break
+                if candidates:
+                    break
         except json.JSONDecodeError as exc:
             acquisition_failures.append(("PARSER_ERROR", f"invalid Genius search JSON: {exc}"))
             break
@@ -7279,6 +7564,8 @@ def fetch_genius(
             continue
 
     if return_candidate:
+        if candidates:
+            return _collected_lyrics_result(candidates, acquisition_failures, source="Genius")
         if acquisition_failures:
             severity = {
                 "AUTHENTICATION_ERROR": 7,
@@ -7998,8 +8285,6 @@ def fetch_spotify(
                 is_track_match(name, value, song, artist, provider_duration, duration) for value in artists
             ):
                 continue
-            if album and album_data.get("name") and text_similarity(str(album_data["name"]), album) < 0.55:
-                continue
             matching.append(item)
         if not matching:
             mark_provider_not_found()
@@ -8011,67 +8296,87 @@ def fetch_spotify(
             )
         )
         results: list[dict[str, Any]] = []
+        item_failures: list[tuple[str, str]] = []
         for item in matching[:3]:
-            spotify_id = str(item.get("id") or "")
-            if not spotify_id:
-                raise ValueError("Spotify matched track lacks an ID")
-            lyrics_payload = get_json(
-                "https://spclient.wg.spotify.com/color-lyrics/v2/track/"
-                + urllib.parse.quote(spotify_id, safe="")
-                + "?format=json&vocalRemoval=false&market=from_token"
-            )
-            lyric_data = lyrics_payload.get("lyrics") if isinstance(lyrics_payload, dict) else None
-            if not isinstance(lyric_data, dict) or not isinstance(lyric_data.get("lines"), list):
-                raise TypeError("Spotify color-lyrics schema changed")
-            sync_type = str(lyric_data.get("syncType") or "").upper()
-            if sync_type not in {"LINE_SYNCED", "UNSYNCED", "SYLLABLE_SYNCED"}:
-                raise ValueError(f"Spotify unsupported synchronization type: {sync_type}")
-            plain_lines: list[str] = []
-            timed_lines: list[str] = []
-            for line in lyric_data["lines"]:
-                if not isinstance(line, dict) or not isinstance(line.get("words"), str):
-                    raise TypeError("Spotify lyric line schema changed")
-                words = line["words"]
-                plain_lines.append(words)
-                if sync_type != "UNSYNCED" and words.strip():
-                    start = str(line.get("startTimeMs") or "")
-                    if not start.isdigit():
-                        raise ValueError("Spotify synchronized line has invalid timestamp")
-                    timed_lines.append(f"[{ms_to_lrc_ts(int(start))}]{words}")
-            plain = "\n".join(plain_lines)
-            if not plain.strip():
+            try:
+                spotify_id = str(item.get("id") or "")
+                if not spotify_id:
+                    raise ValueError("Spotify matched track lacks an ID")
+                lyrics_payload = get_json(
+                    "https://spclient.wg.spotify.com/color-lyrics/v2/track/"
+                    + urllib.parse.quote(spotify_id, safe="")
+                    + "?format=json&vocalRemoval=false&market=from_token"
+                )
+                lyric_data = lyrics_payload.get("lyrics") if isinstance(lyrics_payload, dict) else None
+                if not isinstance(lyric_data, dict) or not isinstance(lyric_data.get("lines"), list):
+                    raise TypeError("Spotify color-lyrics schema changed")
+                sync_type = str(lyric_data.get("syncType") or "").upper()
+                warnings: list[str] = []
+                valid_timing = sync_type in {"LINE_SYNCED", "SYLLABLE_SYNCED"}
+                if sync_type not in {"LINE_SYNCED", "UNSYNCED", "SYLLABLE_SYNCED"}:
+                    warnings.append(f"Spotify unsupported synchronization type: {sync_type}; plain text retained")
+                plain_lines: list[str] = []
+                timed_lines: list[str] = []
+                for line in lyric_data["lines"]:
+                    if not isinstance(line, dict) or not isinstance(line.get("words"), str):
+                        raise TypeError("Spotify lyric line schema changed")
+                    words = line["words"]
+                    plain_lines.append(words)
+                    if sync_type != "UNSYNCED" and words.strip():
+                        start = str(line.get("startTimeMs") or "")
+                        if not start.isdigit():
+                            valid_timing = False
+                            warnings.append("Spotify synchronized line has invalid timestamp; plain text retained")
+                        else:
+                            timed_lines.append(f"[{ms_to_lrc_ts(int(start))}]{words}")
+                if not valid_timing:
+                    timed_lines = []
+                plain = "\n".join(plain_lines)
+                if not plain.strip():
+                    continue
+                album_data = item.get("album") or {}
+                external_ids = item.get("external_ids") or {}
+                results.append(
+                    {
+                        "found": True,
+                        "source": "Spotify",
+                        "id": spotify_id,
+                        "provider_track_id": spotify_id,
+                        "trackName": item["name"],
+                        "artistName": item["artists"][0]["name"],
+                        "albumName": str(album_data.get("name") or ""),
+                        "duration": float(item.get("duration_ms") or 0) / 1000 or None,
+                        "isrc": str(external_ids.get("isrc") or ""),
+                        "language": str(lyric_data.get("language") or ""),
+                        "identity_validated": True,
+                        "source_confidence": 82,
+                        "format": "lrc" if timed_lines else "plain",
+                        "syncType": "linesync" if timed_lines else "none",
+                        "has_word_sync": False,
+                        "validationWarnings": list(dict.fromkeys(warnings)),
+                        "providerRaw": json.dumps(lyrics_payload, ensure_ascii=False),
+                        "rawLyrics": plain,
+                        "plainLyrics": plain,
+                        "syncedLyrics": "\n".join(timed_lines),
+                        "enhancedLyrics": "",
+                        "ttmlLyrics": "",
+                        "attribution": str(lyric_data.get("provider") or "Spotify"),
+                    }
+                )
+            except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+                _record_provider_failure(exc)
+                item_failures.append(classify_lyrics_exception(exc))
                 continue
-            album_data = item.get("album") or {}
-            external_ids = item.get("external_ids") or {}
-            results.append(
-                {
-                    "found": True,
-                    "source": "Spotify",
-                    "id": spotify_id,
-                    "provider_track_id": spotify_id,
-                    "trackName": item["name"],
-                    "artistName": item["artists"][0]["name"],
-                    "albumName": str(album_data.get("name") or ""),
-                    "duration": float(item.get("duration_ms") or 0) / 1000 or None,
-                    "isrc": str(external_ids.get("isrc") or ""),
-                    "language": str(lyric_data.get("language") or ""),
-                    "identity_validated": True,
-                    "source_confidence": 82,
-                    "format": "lrc" if timed_lines else "plain",
-                    "syncType": "linesync" if timed_lines else "none",
-                    "has_word_sync": False,
-                    "providerRaw": json.dumps(lyrics_payload, ensure_ascii=False),
-                    "rawLyrics": plain,
-                    "plainLyrics": plain,
-                    "syncedLyrics": "\n".join(timed_lines),
-                    "enhancedLyrics": "",
-                    "ttmlLyrics": "",
-                    "attribution": str(lyric_data.get("provider") or "Spotify"),
-                }
-            )
         if results:
+            if item_failures:
+                results[0].setdefault("validationWarnings", []).append(
+                    f"some recording candidates failed ({item_failures[0][0]})"
+                )
             results[0]["alternatives"] = results[1:]
             return results[0]
+        if item_failures:
+            status, detail = item_failures[0]
+            return {"source": "Spotify", "acquisition_status": status, "error": detail}
         mark_provider_not_found()
         return {"source": "Spotify", "acquisition_status": "NOT_FOUND"}
     except (OSError, ValueError, TypeError, KeyError, AttributeError, urllib.error.HTTPError) as exc:
@@ -8169,8 +8474,6 @@ def fetch_lyrics_cascade(
                 album=album,
                 duration=duration,
                 timeout=min(timeout, 8),
-                isrc=isrc,
-                recording_id=recording_id,
             )
         return unison_res
 
@@ -8334,6 +8637,8 @@ def fetch_lyrics_cascade(
                 album=album,
                 duration=duration,
                 timeout=min(timeout, 8),
+                isrc=isrc,
+                recording_id=recording_id,
             )
         return lr_res
 
@@ -8668,7 +8973,7 @@ def fetch_lyrics_cascade(
             raw_lrc = r["syncedLyrics"]
             std_lrc = normalize_synced(raw_lrc, keep_word_sync=False, song=song, artist=artist)
             elrc_lrc = normalize_synced(raw_lrc, keep_word_sync=True, song=song, artist=artist)
-            plain_text = to_plain(raw_lrc, song=song, artist=artist) or r.get("plainLyrics", "")
+            plain_text = r.get("plainLyrics") or to_plain(raw_lrc, song=song, artist=artist)
             ttml_xml = lrc_to_ttml(std_lrc, song=song, artist=artist, album=album, duration=duration)
             return {
                 **r,

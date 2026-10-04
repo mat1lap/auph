@@ -6,7 +6,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
+import tempfile
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -32,6 +34,10 @@ from lyrics_quality import (
 )
 from pipeline_config import load_config
 from provider_cache import PARSER_VERSION
+
+# Source HTML/JSON may be larger than its extracted lyric text. Bound them
+# independently so retaining evidence does not discard an otherwise usable form.
+MAX_PROVIDER_RAW_CHARS = 5_000_000
 
 _SECTION_LABEL_RE = re.compile(
     r"^\s*\[(?:verse|chorus|bridge|hook|intro|outro|refrain|pre-?chorus|post-?chorus|"
@@ -90,14 +96,16 @@ class LyricsResolution:
     has_word_sync: bool = False
 
 
-def _ttml_has_word_sync(text: str) -> bool:
-    """Use the TTML provider parser's timing semantics for local archives."""
+def _local_ttml_timing(text: str, duration: float) -> tuple[bool, bool]:
+    """Require a complete validated playback derivative before skipping lookup."""
     try:
         from lyrics_utils import parse_ttml
 
-        return parse_ttml(text)[2]
+        plain, synced, has_words, _background = parse_ttml(text)
+        valid = bool(synced and validate_lrc(synced, duration=duration)[0] and _sync_text_matches_plain(synced, plain))
+        return valid, valid and has_words
     except (ImportError, RecursionError, ValueError, ET.ParseError):
-        return False
+        return False, False
 
 
 def _read(path: Path) -> str:
@@ -111,7 +119,10 @@ def _valid_ttml(text: str) -> bool:
         root = ET.fromstring(text)
     except ET.ParseError:
         return False
-    return root.tag.rsplit("}", 1)[-1].casefold() == "tt" and bool("".join(root.itertext()).strip())
+    return root.tag.rsplit("}", 1)[-1].casefold() == "tt" and any(
+        element.tag.rsplit("}", 1)[-1].casefold() == "p" and "".join(element.itertext()).strip()
+        for element in root.iter()
+    )
 
 
 def _sync_text_matches_plain(synced: str, plain: str) -> bool:
@@ -123,11 +134,13 @@ def _sync_text_matches_plain(synced: str, plain: str) -> bool:
     """
     sync_text = normalize_lookup(lrc_to_plain(synced))
     plain_text = normalize_lookup(plain)
-    if len(sync_text) < 40 or len(plain_text) < 40:
+    if len(plain_text) < 40:
         return True
+    if len(sync_text) < 40 and len(plain_text) >= 80:
+        return False
     length_ratio = max(len(sync_text), len(plain_text)) / max(1, min(len(sync_text), len(plain_text)))
     similarity = text_similarity(sync_text, plain_text)
-    return not (length_ratio >= 1.2 and similarity < 0.82)
+    return not (similarity < 0.60 or (length_ratio >= 1.2 and similarity < 0.82))
 
 
 def inspect_local(base: Path, embedded: Mapping[str, Sequence[str]] | None, duration: float) -> LyricsResolution | None:
@@ -143,6 +156,7 @@ def inspect_local(base: Path, embedded: Mapping[str, Sequence[str]] | None, dura
     valid_paths: dict[str, Path] = {}
     errors: list[str] = []
     local_word_sync = False
+    local_ttml_synced = False
     for kind, path in paths.items():
         if not path.is_file() or path.stat().st_size == 0:
             continue
@@ -167,7 +181,8 @@ def inspect_local(base: Path, embedded: Mapping[str, Sequence[str]] | None, dura
             if not valid:
                 errors.append(f"{path.name}: malformed TTML")
             else:
-                local_word_sync = local_word_sync or _ttml_has_word_sync(text)
+                local_ttml_synced, has_words = _local_ttml_timing(text, duration)
+                local_word_sync = local_word_sync or has_words
         if valid:
             output_kind = "romanization" if kind.startswith("romanization_") else kind
             valid_paths[output_kind] = path
@@ -199,8 +214,11 @@ def inspect_local(base: Path, embedded: Mapping[str, Sequence[str]] | None, dura
                 valid_word_sync, _ = validate_enhanced_lrc(value, duration=duration)
                 local_word_sync = local_word_sync or valid_word_sync
             elif field == "LYRICS_TTML" and _valid_ttml(value):
-                local_word_sync = local_word_sync or _ttml_has_word_sync(value)
-    sidecar_synced = any(kind in valid_paths for kind in ("synced", "enhanced", "ttml"))
+                embedded_valid = True
+                has_timing, has_words = _local_ttml_timing(value, duration)
+                embedded_synced = embedded_synced or has_timing
+                local_word_sync = local_word_sync or has_words
+    sidecar_synced = any(kind in valid_paths for kind in ("synced", "enhanced")) or local_ttml_synced
 
     if valid_paths or embedded_valid:
         source = "Local sidecar" if valid_paths else "Embedded Vorbis comment"
@@ -222,8 +240,10 @@ def inspect_local(base: Path, embedded: Mapping[str, Sequence[str]] | None, dura
 def provider_candidate(
     result: Mapping[str, Any], *, fallback_provider: str, duration: float | None = None
 ) -> LyricsCandidate | None:
-    lyrics_fields = ("syncedLyrics", "plainLyrics", "translationLyrics", "romajiLyrics", "providerRaw", "rawLyrics")
-    if any(len(str(result.get(field) or "")) > MAX_LYRICS_CHARS for field in lyrics_fields):
+    lyrics_fields = ("syncedLyrics", "plainLyrics", "translationLyrics", "romajiLyrics", "rawLyrics")
+    if len(str(result.get("providerRaw") or "")) > MAX_PROVIDER_RAW_CHARS or any(
+        len(str(result.get(field) or "")) > MAX_LYRICS_CHARS for field in lyrics_fields
+    ):
         return None
     synced = conservative_text(str(result.get("syncedLyrics") or ""))
     enhanced = conservative_text(str(result.get("enhancedLyrics") or ""))
@@ -444,11 +464,12 @@ def choose_provider_result(
     isrc: str = "",
     recording_id: str = "",
     verbose: bool = False,
+    local_plain: str = "",
 ) -> LyricsAssessment | None:
     candidates: list[LyricsCandidate] = []
     alternate_candidates: dict[str, list[LyricsCandidate]] = {"translation": [], "romanization": []}
     expanded = _expand_results(results)
-    for index, result in enumerate(expanded):
+    for result in expanded:
         if result.get("acquisition_status") and not (result.get("syncedLyrics") or result.get("plainLyrics")):
             if verbose:
                 print(
@@ -457,14 +478,13 @@ def choose_provider_result(
                 )
             continue
         payload = dict(result)
-        if any(
+        if len(str(payload.get("providerRaw") or "")) > MAX_PROVIDER_RAW_CHARS or any(
             len(str(payload.get(field) or "")) > MAX_LYRICS_CHARS
             for field in (
                 "syncedLyrics",
                 "plainLyrics",
                 "translationLyrics",
                 "romajiLyrics",
-                "providerRaw",
                 "rawLyrics",
             )
         ):
@@ -473,9 +493,22 @@ def choose_provider_result(
                     f"[VERBOSE][LYRICS] Provider {payload.get('source', 'unknown')}: INVALID_RESPONSE lyrics payload exceeds safety limit"
                 )
             continue
-        candidate = provider_candidate(payload, fallback_provider=f"provider-{index + 1}", duration=duration)
+        candidate = provider_candidate(payload, fallback_provider="unknown", duration=duration)
         if not candidate:
             continue
+        if local_plain and candidate.synced and not _sync_text_matches_plain(candidate.synced_lyrics, local_plain):
+            payload["syncedLyrics"] = ""
+            payload["enhancedLyrics"] = ""
+            payload["ttml_native"] = False
+            payload["has_word_sync"] = False
+            payload["plainLyrics"] = candidate.plain_lyrics
+            payload["validationWarnings"] = [
+                *candidate.warnings,
+                "remote timing disagrees with preserved local plain lyrics; timing rejected",
+            ]
+            candidate = provider_candidate(payload, fallback_provider="unknown", duration=duration)
+            if candidate is None:
+                continue
         if candidate.translation:
             alternate_candidates["translation"].append(candidate)
         elif candidate.romanization:
@@ -506,17 +539,25 @@ def choose_provider_result(
                 f"warnings={' | '.join(assessed.warnings)}; reasons={' | '.join(assessed.reasons)}"
             )
 
-    def select_form(items: list[LyricsCandidate]) -> LyricsAssessment | None:
-        return select_best(
-            items,
-            title=title,
-            artist=artist,
-            album=album,
-            duration=duration,
-            language=language,
-            isrc=isrc,
-            recording_id=recording_id,
-        )
+    minimum_score = load_config().lyrics.minimum_candidate_score
+
+    def select_form(items: list[LyricsCandidate], *, require_minimum: bool = True) -> LyricsAssessment | None:
+        remaining = list(items)
+        while remaining:
+            choice = select_best(
+                remaining,
+                title=title,
+                artist=artist,
+                album=album,
+                duration=duration,
+                language=language,
+                isrc=isrc,
+                recording_id=recording_id,
+            )
+            if choice is None or not require_minimum or choice.score >= minimum_score:
+                return choice
+            remaining = [item for item in remaining if item is not choice.candidate]
+        return None
 
     selected = select_form(candidates)
     # A translation/romanization-only provider may still add a useful dedicated
@@ -534,7 +575,7 @@ def choose_provider_result(
         ):
             if enriched.get(field_name):
                 continue
-            form_choice = select_form(alternate_candidates[form_name])
+            form_choice = select_form(alternate_candidates[form_name], require_minimum=False)
             if form_choice is None:
                 continue
             form_candidate = form_choice.candidate
@@ -789,3 +830,101 @@ def materialize_selected(
         local=False,
         has_word_sync=bool(result.get("has_word_sync")),
     )
+
+
+def materialize_provider_results(
+    base: Path,
+    results: Iterable[Mapping[str, Any] | None],
+    *,
+    title: str,
+    artist: str,
+    album: str,
+    duration: float,
+    language: str = "",
+    isrc: str = "",
+    recording_id: str = "",
+    verbose: bool = False,
+    existing_base: Path | None = None,
+    local_plain: str = "",
+) -> LyricsResolution | None:
+    """Try ranked eligible results; isolate failed conversions from staged output.
+
+    Publishing is into the caller's album staging directory. A filesystem
+    failure during publishing propagates so the album transaction can abort.
+    """
+    pending = []
+    for result in _expand_results(results):
+        item = dict(result)
+        item.pop("alternatives", None)
+        pending.append(item)
+    errors: list[str] = []
+    while pending:
+        assessment = choose_provider_result(
+            pending,
+            title=title,
+            artist=artist,
+            album=album,
+            duration=duration,
+            language=language,
+            isrc=isrc,
+            recording_id=recording_id,
+            verbose=verbose,
+            local_plain=local_plain,
+        )
+        if assessment is None:
+            return None
+        chosen = assessment.candidate
+        publishing = False
+        try:
+            with tempfile.TemporaryDirectory(prefix=".lyrics-attempt-", dir=base.parent) as directory:
+                attempt_root = Path(directory)
+                resolution = materialize_selected(
+                    attempt_root / base.name, assessment, existing_base=existing_base or base
+                )
+                if not any(kind in resolution.paths for kind in ("plain", "synced", "translation", "romanization")):
+                    raise ValueError("selected lyrics produced no usable text representation")
+                produced = dict(resolution.paths)
+                # Materialization succeeded completely. Move its outputs into
+                # album staging, never into the live collection here.
+                publishing = True
+                for kind, path in produced.items():
+                    if path.parent == attempt_root:
+                        destination = base.parent / path.name
+                        os.replace(path, destination)
+                        produced[kind] = destination
+                return LyricsResolution(
+                    resolution.source,
+                    resolution.status,
+                    produced,
+                    assessment=assessment,
+                    errors=tuple(errors),
+                    has_word_sync=resolution.has_word_sync,
+                )
+        except (ValueError, UnicodeError) as exc:
+            errors.append(f"{chosen.provider}: {exc}")
+        except OSError as exc:
+            # A failed file conversion/write is retriable; a publishing error
+            # after a completed conversion must abort the enclosing transaction.
+            if publishing:
+                raise
+            errors.append(f"{chosen.provider}: {exc}")
+        if verbose:
+            print(f"[VERBOSE][LYRICS] Materialization failed: {errors[-1]}; trying next eligible candidate")
+        remaining = []
+        for item in pending:
+            candidate = provider_candidate(item, fallback_provider="unknown", duration=duration)
+            if candidate and (
+                candidate.provider,
+                candidate.provider_track_id,
+                candidate.plain_lyrics or candidate.text,
+            ) == (
+                chosen.provider,
+                chosen.provider_track_id,
+                chosen.plain_lyrics or chosen.text,
+            ):
+                continue
+            remaining.append(item)
+        if len(remaining) == len(pending):
+            raise RuntimeError("failed lyrics candidate could not be removed from retry pool")
+        pending = remaining
+    return None

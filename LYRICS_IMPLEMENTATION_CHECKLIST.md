@@ -118,7 +118,7 @@ scope for this lyrics implementation.
 - [x] Cache identity includes provider, adapter, title/artist/album/version,
   duration, stable IDs, and language; parser/schema version invalidates stale
   serialized responses.
-- [x] `provider_cache.PARSER_VERSION` is `2026-09-25-lyrics-v7`.
+- [x] `provider_cache.PARSER_VERSION` is `2026-10-04-lyrics-v9`.
 - [x] Content-addressed sidecars prevent collisions and preserve curated files;
   conversion manifests now include schema and parser versions, evidence,
   transformations, and artifact hashes.
@@ -200,3 +200,9 @@ Latest source verification (2026-09-26):
 - The full suite includes `test_restored_lyrics_providers.py`, `test_pipeline_safety.py`,
   and FLAC tag/sidecar integration tests. Provider network access is mocked in
   deterministic tests; these results do not claim live endpoint availability.
+
+## Acquisition/selection audit follow-up
+
+See [SELECTION_AUDIT.md](SELECTION_AUDIT.md) for verified defects, provider and
+failure matrices, regression coverage and live compatibility limitations. Checked
+items above describe implementation contracts, not proof of live provider coverage.

@@ -184,3 +184,9 @@ spaces in the EAC-log and raw UltraStar HTML fixtures; those source forms were
 preserved instead of rewriting fixture content for a whitespace check.
 
 Final relocated suite: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider` — **486 passed in 99.71 seconds**, with no skips.
+
+## Lyrics/artwork selection follow-up — 2026-10-04
+
+[SELECTION_AUDIT.md](SELECTION_AUDIT.md) records S-01 through S-16, the provider
+acquisition and failure matrices, and actual verification outcomes. New regressions
+are in `test_selection_audit.py`; all added writes target temporary fixtures.

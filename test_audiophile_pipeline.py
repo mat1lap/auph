@@ -124,7 +124,7 @@ class TestCoverFetcherStringCleaning:
 class TestCoverProviderClassification:
     def test_is_digital_provider(self) -> None:
         assert is_digital_provider("Apple Music / iTunes CDN") is True
-        assert is_digital_provider("Deezer High-Res CDN") is True
+        assert is_digital_provider("Deezer CDN") is True
         assert is_digital_provider("Spotify CDN") is True
         assert is_digital_provider("Tidal CDN") is True
         assert is_digital_provider("Qobuz CDN") is True
@@ -142,7 +142,7 @@ class TestCoverProviderClassification:
         # Critical invariant: Local Existing File must NOT be categorized as a physical scan
         assert is_scan_provider("Local Existing File") is False
         assert is_scan_provider("Apple Music / iTunes CDN") is False
-        assert is_scan_provider("Deezer High-Res CDN") is False
+        assert is_scan_provider("Deezer CDN") is False
 
 
 # ==============================================================================
@@ -5236,7 +5236,7 @@ class TestNewCoverProvidersAndMetadataDeduplication:
         assert "medium" in by_type and by_type["medium"].url == "https://assets.fanart.tv/cd.png"
         assert "back" in by_type and by_type["back"].url == "https://assets.fanart.tv/back.jpg"
 
-    def test_query_bandcamp_master_resolution(self, monkeypatch) -> None:
+    def test_query_bandcamp_preserves_supplied_representation(self, monkeypatch) -> None:
         import json
 
         sample_bc = {
@@ -5256,7 +5256,8 @@ class TestNewCoverProvidersAndMetadataDeduplication:
         monkeypatch.setattr(fetcher, "fetch_url", lambda url, headers=None: json.dumps(sample_bc).encode("utf-8"))
         cands = fetcher.query_bandcamp()
         assert len(cands) == 1
-        assert cands[0].url == "https://f4.bcbits.com/img/a12345678_0.jpg"
+        assert cands[0].url == "https://f4.bcbits.com/img/a12345678_10.jpg"
+        assert not cands[0].source_verified_original
         assert cands[0].provider == "Bandcamp Artwork"
 
     def test_query_caa_front_only(self, monkeypatch) -> None:
@@ -5511,8 +5512,9 @@ class TestWorldClassVorbisAndCoverPipelineEnhancements:
         monkeypatch.setattr(fetcher, "fetch_url", lambda url, headers=None: sample_html.encode("utf-8"))
         cands = fetcher.query_qobuz()
         assert len(cands) == 2
-        assert cands[0].provider == "Qobuz High-Res CDN"
-        assert cands[0].url == "https://static.qobuz.com/images/covers/44/b6/zw9o56jyjb644_org.jpg"
+        assert cands[0].provider == "Qobuz CDN"
+        assert cands[0].url == "https://static.qobuz.com/images/covers/44/b6/zw9o56jyjb644_230.jpg"
+        assert not cands[0].source_verified_original
         assert not any("marriner" in c.url for c in cands)
 
     def test_verify_all_flacs_detects_case_duplicate(self, tmp_path: Path) -> None:

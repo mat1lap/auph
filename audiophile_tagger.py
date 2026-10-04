@@ -2346,6 +2346,13 @@ def process_single_track(
                     provider_results.append({"acquisition_status": status, "error": detail})
                     if is_verbose:
                         print(f"[VERBOSE][LYRICS] Provider error for '{final_title}': {exc}")
+        local_plain = ""
+        if lyrics_resolution and lyrics_resolution.local:
+            plain_path = lyrics_paths.get("plain")
+            if plain_path:
+                local_plain = plain_path.read_text(encoding="utf-8")
+            elif audio.tags:
+                local_plain = next(iter(audio.tags.get("UNSYNCEDLYRICS", []) or audio.tags.get("LYRICS", [])), "")
         selected_lyrics = lyrics_pipeline.choose_provider_result(
             provider_results,
             title=final_title,
@@ -2356,7 +2363,27 @@ def process_single_track(
             isrc=resolved_isrcs[0] if resolved_isrcs else "",
             recording_id=resolved_recording_id,
             verbose=is_verbose,
+            local_plain=local_plain,
         )
+        remote_resolution = None
+        materialization_failed = False
+        if selected_lyrics and not dry_run:
+            remote_resolution = lyrics_pipeline.materialize_provider_results(
+                write_target or f,
+                provider_results,
+                existing_base=f,
+                title=final_title,
+                artist=final_artist,
+                album=album_clean,
+                duration=track_duration,
+                language=resolved_language,
+                isrc=resolved_isrcs[0] if resolved_isrcs else "",
+                recording_id=resolved_recording_id,
+                verbose=is_verbose,
+                local_plain=local_plain,
+            )
+            materialization_failed = remote_resolution is None
+            selected_lyrics = remote_resolution.assessment if remote_resolution else None
         if selected_lyrics:
             if is_verbose:
                 cand = selected_lyrics.candidate
@@ -2373,9 +2400,7 @@ def process_single_track(
                 # Remote sidecars are generated beside the staged FLAC. They
                 # become visible only with the album transaction commit.
                 old_paths = dict(lyrics_resolution.paths) if lyrics_resolution and lyrics_resolution.local else {}
-                remote_resolution = lyrics_pipeline.materialize_selected(
-                    write_target or f, selected_lyrics, existing_base=f
-                )
+                assert remote_resolution is not None
                 merged_paths = {**remote_resolution.paths, **old_paths}
                 lyrics_resolution = lyrics_pipeline.LyricsResolution(
                     remote_resolution.source,
@@ -2399,7 +2424,11 @@ def process_single_track(
             if not resolved_language and selected_lyrics.candidate.language:
                 resolved_language = selected_lyrics.candidate.language
         else:
-            lookup_status = lyrics_pipeline.unsuccessful_lookup_status(provider_results)
+            lookup_status = (
+                "MATERIALIZATION_ERROR"
+                if materialization_failed
+                else lyrics_pipeline.unsuccessful_lookup_status(provider_results)
+            )
             if lookup_status == "INSTRUMENTAL" and lyrics_resolution is None:
                 evidence = lyrics_pipeline.verified_instrumental_result(provider_results)
                 is_instrumental = True
@@ -4251,23 +4280,32 @@ def process_album(
             best_cand, all_cands = None, []
             fetcher = None
 
-    if best_cand and best_cand.raw_data and not interactive_covers:
-        selected_cover = best_cand
-
-    if best_cand and best_cand.raw_data and not cover_file.is_file() and not interactive_covers:
-        audiophile_cover_fetcher.save_optimized_cover(best_cand.raw_data, cover_tmp, crop_box=best_cand.crop_box)
+    if best_cand and best_cand.raw_data and not interactive_covers and not manual_covers and fetcher is not None:
+        prepared_cover = audiophile_cover_fetcher.prepare_best_cover(fetcher, all_cands, cover_tmp, preferred=best_cand)
+        selected_cover = prepared_cover.candidate if prepared_cover else None
 
     if manual_covers and not dry_run:
-        chosen = audiophile_cover_fetcher.prompt_all_cover_choice(all_cands, best_cand)
-        if chosen and chosen.raw_data:
-            selected_cover = chosen
-            audiophile_cover_fetcher.save_optimized_cover(chosen.raw_data, cover_tmp, crop_box=chosen.crop_box)
+        while fetcher is not None:
+            chosen = audiophile_cover_fetcher.prompt_all_cover_choice(all_cands, best_cand)
+            if not chosen or not chosen.raw_data:
+                break
+            prepared_cover = audiophile_cover_fetcher.prepare_best_cover(
+                fetcher, all_cands, cover_tmp, preferred=chosen, allow_fallback=False
+            )
+            if prepared_cover:
+                selected_cover = chosen
+                break
+            best_cand = fetcher._best_in_release_tier(all_cands)
+            if best_cand is None:
+                break
     elif interactive_covers and fetcher is not None:
         choices = audiophile_cover_fetcher.select_cover_categories(fetcher, all_cands)
         if choices:
             with tempfile.TemporaryDirectory(prefix=".cover-options-", dir=folder) as option_directory:
                 option_root = Path(option_directory)
-                audiophile_cover_fetcher.prepare_cover_choices(choices, option_root)
+                audiophile_cover_fetcher.prepare_cover_choices(
+                    choices, option_root, fetcher=fetcher, candidates=all_cands
+                )
                 comparison = option_root / "comparison.jpg"
                 audiophile_cover_fetcher.create_comparison_image(None, None, best_cand, comparison, options=choices)
                 displayed = audiophile_cover_fetcher.emit_kitty_image(comparison)
@@ -4319,9 +4357,11 @@ def process_album(
             and selected_cover.raw_data == cover_file.read_bytes()
         ):
             replace_cover_file = True
-        if replace_cover_file and not (interactive_selected and cover_tmp.is_file()):
+        if replace_cover_file and not cover_tmp.is_file():
             audiophile_cover_fetcher.save_optimized_cover(
-                selected_cover.raw_data, cover_tmp, crop_box=selected_cover.crop_box
+                selected_cover.raw_data,
+                cover_tmp,
+                crop_box=selected_cover.crop_box if selected_cover.crop_confidence >= 0.8 else None,
             )
 
     if selected_cover and selected_cover.raw_data and fetcher is not None:

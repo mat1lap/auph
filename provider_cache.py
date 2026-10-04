@@ -32,7 +32,7 @@ class JsonSession(Protocol):
 
 
 SCHEMA_VERSION = 2
-PARSER_VERSION = "2026-09-25-lyrics-v8"
+PARSER_VERSION = "2026-10-04-lyrics-v9"
 
 
 def redact_secrets(message: str) -> str:

@@ -1807,7 +1807,7 @@ class TestLyricsSafety:
                                     "primary_artist": {"name": "Artist"},
                                     "primary_album": {"name": "Album"},
                                     "duration_ms": 120_000,
-                                    "url": "https://genius.test/song",
+                                    "url": "https://genius.com/song",
                                 },
                             }
                         ],

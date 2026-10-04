@@ -3,9 +3,9 @@
 
 Discovers, ranks, and retrieves the highest quality and most aesthetically pleasing
 album artwork across:
-1. Apple Music / iTunes CDN (up to 3000x3000px / 4000x4000px digital label masters).
+1. Apple Music / iTunes provider-supplied artwork representations.
 2. Cover Art Archive (MusicBrainz Release-Group & Release curated front scans).
-3. Deezer High-Res CDN (up to 1800x1800px uncompressed official artwork).
+3. Deezer provider-supplied artwork representations.
 4. Discogs API (physical release & master release scans).
 5. Existing local cover art (scans directory, artwork directory, local high-res files).
 
@@ -46,7 +46,7 @@ import threading
 import time
 import unicodedata
 import urllib.parse
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import IntEnum, StrEnum
 from pathlib import Path
 from typing import Any
@@ -487,8 +487,22 @@ class CoverCandidate:
                 self.declared_height,
             )
             previews = tuple(
-                ImageRepresentation(url, RepresentationKind.THUMBNAIL, True)
-                for url in self.preview_urls.values()
+                ImageRepresentation(
+                    url,
+                    RepresentationKind.THUMBNAIL,
+                    True,
+                    int(_name) if _name.isdigit() else {"large": 500, "small": 250}.get(_name, 0),
+                    int(_name) if _name.isdigit() else {"large": 500, "small": 250}.get(_name, 0),
+                )
+                for _name, url in sorted(
+                    self.preview_urls.items(),
+                    key=lambda item: (
+                        int(item[0]) if item[0].isdigit() else {"large": 500, "small": 250}.get(item[0], 0),
+                        item[0],
+                        item[1],
+                    ),
+                    reverse=True,
+                )
                 if url and url != self.original_url
             )
             self.representations = (source, *previews)
@@ -742,7 +756,7 @@ class CoverFetcher:
                 if self.artist and not artist_matches(self.artist, art_name):
                     continue
 
-                high_art = re.sub(r"/\d+x\d+bb\.(jpg|png)$", r"/4000x4000bb.\1", raw_art)
+                high_art = raw_art
                 if high_art in seen_artworks:
                     continue
                 seen_artworks.add(high_art)
@@ -791,7 +805,7 @@ class CoverFetcher:
             if self.artist and not artist_matches(self.artist, art_name):
                 continue
 
-            high_art = re.sub(r"/\d+x\d+-\d+-\d+-\d+-\d+\.jpg$", r"/1800x1800-000000-100-0-0.jpg", cover_url)
+            high_art = str(cover_url)
             if high_art in seen:
                 continue
             seen.add(high_art)
@@ -799,7 +813,7 @@ class CoverFetcher:
             match_ratio = compute_album_match(self.clean_album, alb_name)
             candidates.append(
                 CoverCandidate(
-                    provider="Deezer High-Res CDN",
+                    provider="Deezer CDN",
                     url=high_art,
                     title=f"{art_name} - {alb_name}",
                     album_match_ratio=match_ratio,
@@ -835,9 +849,15 @@ class CoverFetcher:
                             rg_id
                             and str(rg.get("primary-type") or "").casefold() == "album"
                             and compute_album_match(self.clean_album, rg_title) >= 0.7
+                            and any(
+                                artist_matches(
+                                    self.artist, str(credit.get("name") or credit.get("artist", {}).get("name") or "")
+                                )
+                                for credit in rg.get("artist-credit", [])
+                                if isinstance(credit, dict)
+                            )
                         ):
                             caa_targets.append((f"https://coverartarchive.org/release-group/{rg_id}", "Release-Group"))
-                            break
                 except (ValueError, UnicodeDecodeError):
                     pass
 
@@ -926,7 +946,9 @@ class CoverFetcher:
                         provider_image_id=str(img.get("id") or _url_numeric_image_id(orig_img)),
                         provider_release_id=image_release_id,
                         musicbrainz_release_id=image_release_id if kind == "Release" else "",
-                        musicbrainz_release_group_id=self.mb_rg_id,
+                        musicbrainz_release_group_id=(
+                            caa_url.rsplit("/", 1)[-1] if kind == "Release-Group" else self.mb_rg_id
+                        ),
                         original_url=orig_img,
                         preview_urls=thumbnails,
                         source_verified_original=True,
@@ -1376,8 +1398,6 @@ class CoverFetcher:
             results = data.get("results") or data.get("auto", {}).get("results", [])
             for item in results:
                 raw_img = item.get("img") or ""
-                art_id = item.get("art_id")
-                img_id = item.get("img_id")
                 item_name = item.get("name") or ""
                 item_band = item.get("band_name") or ""
                 if self.artist and not artist_matches(self.artist, item_band):
@@ -1386,14 +1406,9 @@ class CoverFetcher:
                 if match_ratio < 0.7:
                     continue
 
-                if raw_img:
-                    master_url = re.sub(r"_\d+\.(jpg|png)$", r"_0.\1", raw_img)
-                elif art_id:
-                    master_url = f"https://f4.bcbits.com/img/a{art_id}_0.jpg"
-                elif img_id:
-                    master_url = f"https://f4.bcbits.com/img/00{img_id}_0.jpg"
-                else:
+                if not raw_img:
                     continue
+                master_url = str(raw_img)
 
                 candidates.append(
                     CoverCandidate(
@@ -1490,14 +1505,14 @@ class CoverFetcher:
                 if "static.qobuz.com/images/covers/" not in src:
                     continue
 
-                org_u = re.sub(r"_[0-9]+\.jpg$", "_org.jpg", src)
+                org_u = src
                 if org_u in seen:
                     continue
                 seen.add(org_u)
 
                 candidates.append(
                     CoverCandidate(
-                        provider="Qobuz High-Res CDN",
+                        provider="Qobuz CDN",
                         url=org_u,
                         title=f"{art_name} - {alb_name}",
                         album_match_ratio=match_ratio,
@@ -1918,29 +1933,51 @@ class CoverFetcher:
         """Probe the original representation and calculate content-based quality evidence."""
         source_url = cand.original_url or cand.url
         if cand.raw_data is None:
+            failures: list[str] = []
+            seen_urls: set[str] = set()
             for representation in cand.representations:
-                if not representation.url:
+                if not representation.url or representation.url in seen_urls:
                     continue
+                seen_urls.add(representation.url)
                 headers = {}
                 if "discogs.com" in representation.url and self.discogs_token:
                     headers["Authorization"] = f"Discogs token={self.discogs_token}"
-                cand.raw_data = self.fetch_url(representation.url, headers=headers)
-                if cand.raw_data:
-                    cand.evaluated_url = representation.url
-                    cand.representation_kind = representation.kind
-                    cand.generated_representation = representation.generated
-                    cand.source_verified_original = (
-                        representation.kind
-                        in {
-                            RepresentationKind.ORIGINAL,
-                            RepresentationKind.LOCAL,
-                        }
+                data = self.fetch_url(representation.url, headers=headers)
+                if not data:
+                    failures.append(self.last_fetch_errors.get(representation.url, "empty_response"))
+                    continue
+                probe = replace(
+                    cand,
+                    raw_data=data,
+                    evaluated_url=representation.url,
+                    representation_kind=representation.kind,
+                    generated_representation=representation.generated,
+                    source_verified_original=(
+                        representation.kind in {RepresentationKind.ORIGINAL, RepresentationKind.LOCAL}
                         and not representation.generated
-                    )
-                    if representation.url != source_url:
-                        cand.warnings.append("preferred representation unavailable; evaluated fallback")
-                    break
-        else:
+                    ),
+                    warnings=list(cand.warnings),
+                    rejection_reasons=list(cand.rejection_reasons),
+                )
+                self.evaluate_candidate(probe)
+                if probe.error:
+                    failures.append(probe.error)
+                    # Header-valid but corrupt cached images must not poison
+                    # subsequent retrievals of the preferred representation.
+                    try:
+                        self._get_cache_path(representation.url).unlink(missing_ok=True)
+                    except OSError as exc:
+                        failures.append(f"corrupt cache removal failed: {type(exc).__name__}")
+                    continue
+                if failures or representation.url != source_url:
+                    probe.warnings.append("preferred representation unavailable; evaluated fallback")
+                cand.__dict__.update(probe.__dict__)
+                return cand
+            cand.error = failures[-1] if failures else "empty_or_too_small_payload"
+            cand.rejection_reasons.append(cand.error)
+            cand.total_score = -9999.0
+            return cand
+        elif not cand.evaluated_url:
             cand.evaluated_url = source_url
 
         if not cand.raw_data:
@@ -2311,8 +2348,49 @@ class CoverFetcher:
             source_url = cand.original_url or cand.url
             identity_key = (source_url, cand.release_key, cand.provider_release_id)
             previous = unique_cands.get(identity_key)
-            if previous is None or (cand.release_tier, cand.role_tier) > (previous.release_tier, previous.role_tier):
+            if previous is None:
                 unique_cands[identity_key] = cand
+                continue
+            best = max(
+                (previous, cand),
+                key=lambda item: (
+                    item.release_tier,
+                    item.role_tier,
+                    item.role_confidence,
+                    item.source_verified_original,
+                    item.provider,
+                    item.stable_id,
+                ),
+            )
+            representations: dict[str, ImageRepresentation] = {}
+            for representation in (*previous.representations, *cand.representations):
+                known = representations.get(representation.url)
+
+                def evidence_key(item: ImageRepresentation) -> tuple[bool, bool, int, int, str]:
+                    return (
+                        item.kind in {RepresentationKind.ORIGINAL, RepresentationKind.LOCAL},
+                        not item.generated,
+                        item.declared_width,
+                        item.declared_height,
+                        item.kind.value,
+                    )
+
+                if known is None or evidence_key(representation) > evidence_key(known):
+                    representations[representation.url] = representation
+            best.representations = tuple(
+                sorted(
+                    representations.values(),
+                    key=lambda representation: (
+                        representation.url == source_url,
+                        representation.declared_width * representation.declared_height,
+                        representation.url,
+                    ),
+                    reverse=True,
+                )
+            )
+            best.preview_urls = {**previous.preview_urls, **cand.preview_urls}
+            best.warnings = sorted(set(previous.warnings + cand.warnings))
+            unique_cands[identity_key] = best
 
         metadata_candidates: list[CoverCandidate] = []
         prefilter_rejected: list[CoverCandidate] = []
@@ -2553,14 +2631,17 @@ class CoverFetcher:
                 print(f"{'=' * 74}\n")
 
         if self.folder and self.write_preview_files:
-            if best_digital and best_digital.raw_data:
-                d_save = self.folder / ".cover_digital.jpg"
-                save_optimized_cover(best_digital.raw_data, d_save, crop_box=best_digital.crop_box)
-                best_digital.local_saved_path = d_save
-            if best_scan and best_scan.raw_data:
-                s_save = self.folder / ".cover_scan.jpg"
-                save_optimized_cover(best_scan.raw_data, s_save, crop_box=best_scan.crop_box)
-                best_scan.local_saved_path = s_save
+            for candidate, name in ((best_digital, ".cover_digital.jpg"), (best_scan, ".cover_scan.jpg")):
+                if candidate and candidate.raw_data:
+                    prepared = prepare_best_cover(
+                        self, evaluated, self.folder / name, preferred=candidate, allow_fallback=False
+                    )
+                    if prepared:
+                        candidate.local_saved_path = prepared.prepared_path
+                    else:
+                        candidate.warnings.append(
+                            "preview materialization failed; selection will retry eligible covers"
+                        )
 
         return winner, best_digital, best_scan, evaluated
 
@@ -2602,10 +2683,87 @@ def select_cover_categories(fetcher: CoverFetcher, candidates: list[CoverCandida
     ]
 
 
-def prepare_cover_choices(choices: list[CoverChoice], directory: Path) -> None:
+def prepare_best_cover(
+    fetcher: CoverFetcher,
+    candidates: list[CoverCandidate],
+    destination: Path,
+    *,
+    preferred: CoverCandidate | None = None,
+    category: str | None = None,
+    allow_fallback: bool = True,
+) -> CoverChoice | None:
+    """Materialize eligible artwork before publishing, retrying validated alternatives."""
+    pool = [c for c in candidates if is_valid_manual_cover(c) and (category is None or cover_category(c) == category)]
+    deferred = sorted(
+        (
+            c
+            for c in candidates
+            if c.rejection_reasons == ["not_probed_lower_release_tier"]
+            and (category is None or cover_category(c) == category)
+        ),
+        key=lambda c: (int(c.release_tier), c.provider, c.stable_id),
+        reverse=True,
+    )
+    candidate = (
+        preferred if preferred is not None and is_valid_manual_cover(preferred) else fetcher._best_in_release_tier(pool)
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        if candidate is None:
+            if not allow_fallback or not deferred:
+                return None
+            next_candidate = deferred.pop(0)
+            next_candidate.rejection_reasons.remove("not_probed_lower_release_tier")
+            fetcher.evaluate_candidate(next_candidate)
+            if is_valid_manual_cover(next_candidate):
+                pool.append(next_candidate)
+            candidate = fetcher._best_in_release_tier(pool)
+            continue
+        crop = candidate.crop_box if candidate.crop_confidence >= 0.8 else None
+        fd, name = tempfile.mkstemp(prefix=".cover-materialize-", suffix=".jpg", dir=destination.parent)
+        os.close(fd)
+        attempt = Path(name)
+        try:
+            width, height, _size = save_optimized_cover(candidate.raw_data or b"", attempt, crop_box=crop)
+        except (OSError, ValueError, Image.DecompressionBombError) as exc:
+            candidate.rejection_reasons.append("materialization_failed")
+            candidate.warnings.append(f"cover materialization failed: {exc}")
+            print(f"  -> Artwork from {candidate.provider} could not be prepared: {exc}")
+        else:
+            # Publication errors abort the enclosing album transaction rather
+            # than pretending that a different source can repair the filesystem.
+            os.replace(attempt, destination)
+            return CoverChoice(cover_category(candidate), candidate, destination, width, height, crop is not None)
+        finally:
+            attempt.unlink(missing_ok=True)
+        if not allow_fallback:
+            return None
+        pool = [c for c in pool if not c.rejection_reasons]
+        candidate = fetcher._best_in_release_tier(pool)
+
+
+def prepare_cover_choices(
+    choices: list[CoverChoice],
+    directory: Path,
+    *,
+    fetcher: CoverFetcher | None = None,
+    candidates: list[CoverCandidate] | None = None,
+) -> None:
     """Materialize each selected front once; menu and final staging use these bytes."""
     directory.mkdir(parents=True, exist_ok=True)
+    prepared: list[CoverChoice] = []
     for index, choice in enumerate(choices, start=1):
+        if fetcher is not None:
+            option = prepare_best_cover(
+                fetcher,
+                candidates or [],
+                directory / f"{index}-{choice.category}.jpg",
+                preferred=choice.candidate,
+                category=choice.category,
+            )
+            if option is not None:
+                prepared.append(option)
+            continue
         source = choice.candidate.raw_data
         if not source:
             raise ValueError(f"{choice.category} cover has no image data")
@@ -2616,6 +2774,8 @@ def prepare_cover_choices(choices: list[CoverChoice], directory: Path) -> None:
         choice.prepared_width = width
         choice.prepared_height = height
         choice.applied_crop = crop is not None
+        prepared.append(choice)
+    choices[:] = prepared
 
 
 def save_optimized_cover(
@@ -3055,10 +3215,16 @@ def prompt_cover_choice(
                 except OSError:
                     pass
             if automatic_choice.raw_data and output_path:
-                save_optimized_cover(automatic_choice.raw_data, output_path, crop_box=automatic_choice.crop_box)
+                save_optimized_cover(
+                    automatic_choice.raw_data,
+                    output_path,
+                    crop_box=automatic_choice.crop_box if automatic_choice.crop_confidence >= 0.8 else None,
+                )
                 if folder_path and output_path != (folder_path / "cover.jpg"):
                     save_optimized_cover(
-                        automatic_choice.raw_data, folder_path / "cover.jpg", crop_box=automatic_choice.crop_box
+                        automatic_choice.raw_data,
+                        folder_path / "cover.jpg",
+                        crop_box=automatic_choice.crop_box if automatic_choice.crop_confidence >= 0.8 else None,
                     )
             print(
                 f"  \033[1;32m✔\033[0m Обложка: {automatic_choice.provider} ({automatic_choice.width}×{automatic_choice.height}, quality: {automatic_choice.visual_quality_score:.1f})"
@@ -3078,10 +3244,16 @@ def prompt_cover_choice(
                 except OSError:
                     pass
             if automatic_choice.raw_data and output_path:
-                save_optimized_cover(automatic_choice.raw_data, output_path, crop_box=automatic_choice.crop_box)
+                save_optimized_cover(
+                    automatic_choice.raw_data,
+                    output_path,
+                    crop_box=automatic_choice.crop_box if automatic_choice.crop_confidence >= 0.8 else None,
+                )
                 if folder_path and output_path != (folder_path / "cover.jpg"):
                     save_optimized_cover(
-                        automatic_choice.raw_data, folder_path / "cover.jpg", crop_box=automatic_choice.crop_box
+                        automatic_choice.raw_data,
+                        folder_path / "cover.jpg",
+                        crop_box=automatic_choice.crop_box if automatic_choice.crop_confidence >= 0.8 else None,
                     )
             print(
                 f"  \033[1;32m✔\033[0m Обложка: {automatic_choice.provider} ({automatic_choice.width}×{automatic_choice.height}, quality: {automatic_choice.visual_quality_score:.1f})"
@@ -3168,9 +3340,15 @@ def prompt_cover_choice(
                 pass
 
         if chosen.raw_data and output_path:
-            save_optimized_cover(chosen.raw_data, output_path, crop_box=chosen.crop_box)
+            save_optimized_cover(
+                chosen.raw_data, output_path, crop_box=chosen.crop_box if chosen.crop_confidence >= 0.8 else None
+            )
             if folder_path and output_path != (folder_path / "cover.jpg"):
-                save_optimized_cover(chosen.raw_data, folder_path / "cover.jpg", crop_box=chosen.crop_box)
+                save_optimized_cover(
+                    chosen.raw_data,
+                    folder_path / "cover.jpg",
+                    crop_box=chosen.crop_box if chosen.crop_confidence >= 0.8 else None,
+                )
 
         print(
             f"  \033[1;32m✔\033[0m Выбрана обложка: {chosen.provider} ({chosen.width}×{chosen.height}, quality: {chosen.visual_quality_score:.1f})\n"
@@ -3442,7 +3620,7 @@ def main() -> int:
         if choices:
             preview_parent = folder_path if folder_path and folder_path.is_dir() else None
             with tempfile.TemporaryDirectory(prefix="cover-options-", dir=preview_parent) as option_directory:
-                prepare_cover_choices(choices, Path(option_directory))
+                prepare_cover_choices(choices, Path(option_directory), fetcher=fetcher, candidates=all_cands)
                 comparison = Path(option_directory) / "comparison.jpg"
                 create_comparison_image(None, None, winner, comparison, target_dim=args.preview_size, options=choices)
                 if not emit_kitty_image(comparison):
@@ -3460,9 +3638,15 @@ def main() -> int:
             print("No eligible front-cover artwork was found.")
             winner = None
     elif winner and winner.raw_data and out_file:
-        saved_w, saved_h, saved_sz = save_optimized_cover(winner.raw_data, out_file, crop_box=winner.crop_box)
+        prepared = prepare_best_cover(
+            fetcher, all_cands, out_file, preferred=winner, allow_fallback=not args.manual_covers
+        )
+        winner = prepared.candidate if prepared else None
+        if prepared:
+            saved_w, saved_h, saved_sz = prepared.prepared_width, prepared.prepared_height, out_file.stat().st_size
         if folder_path and out_file != (folder_path / "cover.jpg"):
-            save_optimized_cover(winner.raw_data, folder_path / "cover.jpg", crop_box=winner.crop_box)
+            if prepared:
+                shutil.copy2(out_file, folder_path / "cover.jpg")
 
     if folder_path and not interactive_default:
         comp_file = folder_path / ".cover_comparison.jpg"
