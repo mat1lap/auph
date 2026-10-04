@@ -1,0 +1,6 @@
+# Versions verified in the 2026-09-26 audit environment (Python 3.14).
+beautifulsoup4==4.15.0
+mutagen==1.48.1
+numpy==2.5.3
+pillow==12.3.0
+requests==2.34.2

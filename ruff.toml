@@ -1,0 +1,17 @@
+line-length = 120
+
+[lint]
+ignore = [
+    "E501",   # line length handled by formatter
+    "BLE001", # broad exceptions in network fallbacks
+    "S110",   # try-except-pass in network fallback cascades
+    "S112",   # try-except-continue in network fallback cascades
+    "SIM115", # file open in simple string reads
+    "SIM102", # nesting often preserves review-oriented branching clarity
+    "PLW1510", # providers intentionally inspect non-zero tool return codes
+    "EXE001",  # library modules retain conventional shebangs but are not CLIs
+]
+
+[lint.per-file-ignores]
+# Mutagen's Vorbis mapping has non-standard iterator semantics.
+"test_audiophile_pipeline.py" = ["SIM118"]

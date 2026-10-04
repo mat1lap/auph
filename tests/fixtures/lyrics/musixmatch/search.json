@@ -1,0 +1,25 @@
+{
+  "message": {
+    "header": {"status_code": 200, "execute_time": 0.01},
+    "body": {
+      "track_list": [
+        {
+          "track": {
+            "track_id": 42001,
+            "commontrack_id": 84001,
+            "track_name": "Fixture Song",
+            "artist_name": "Fixture Artist",
+            "album_name": "Fixture Album",
+            "track_length": 201,
+            "track_isrc": "USAAA2400001",
+            "track_language": "en",
+            "has_lyrics": 1,
+            "instrumental": 0,
+            "explicit": 0,
+            "track_rating": 87
+          }
+        }
+      ]
+    }
+  }
+}

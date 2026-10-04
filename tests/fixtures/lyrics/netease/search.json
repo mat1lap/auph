@@ -1,0 +1,20 @@
+{
+  "result": {
+    "songs": [
+      {
+        "id": 8101,
+        "name": "Fixture Song",
+        "ar": [{"name": "Fixture Artist"}],
+        "al": {"name": "Wrong Compilation"},
+        "dt": 181000
+      },
+      {
+        "id": 8102,
+        "name": "Fixture Song",
+        "ar": [{"name": "Fixture Artist"}],
+        "al": {"name": "Fixture Album"},
+        "dt": 181000
+      }
+    ]
+  }
+}

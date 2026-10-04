@@ -1,0 +1,33 @@
+[matching]
+# Only HIGH-or-better candidates are eligible; these numeric gates resolve
+# ties within that set. Close candidates are REVIEW_REQUIRED, never guessed.
+release_min_score = 500.0
+release_min_margin = 120.0
+discogs_min_margin = 150.0
+acoustid_min_score = 0.80
+
+[lyrics]
+online_lookup = true
+# ASR/forced-alignment output is generated evidence and is disabled by default.
+generated_candidates = false
+minimum_candidate_score = 75.0
+remove_section_labels = true
+embed_synced_in_lyrics = true
+write_synced_compat_alias = true
+retain_raw_provider_evidence = true
+
+[loudness]
+enabled = true
+prevent_clipping = true
+# R128_TRACK_GAIN/R128_ALBUM_GAIN are not emitted for FLAC.
+write_r128_flac_tags = false
+retain_enhanced_tags = true
+preserve_existing_measurements = true
+
+[preservation]
+preserve_unknown_comments = true
+preserve_existing_lyrics = true
+preserve_existing_artwork_file = true
+provenance_ledger = true
+existing_metadata_confidence = "UNKNOWN"
+mirror_total_aliases = true

@@ -1,0 +1,1 @@
+{"message":{"header":{"status_code":200},"body":{"richsync":{"richsync_id":99,"richsync_body":"[{\"ts\":10.0,\"te\":13.0,\"l\":[{\"c\":\"A \",\"o\":0.0},{\"c\":\"first line\",\"o\":0.5}]},{\"ts\":15.675,\"te\":18.0,\"l\":[{\"c\":\"A second line\",\"o\":0.0}]}]"}}}}

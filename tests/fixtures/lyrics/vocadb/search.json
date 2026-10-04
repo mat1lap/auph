@@ -1,0 +1,28 @@
+{
+    "items": [
+        {
+            "id": 765432,
+            "name": "夜に駆ける",
+            "lengthSeconds": 246,
+            "names": {"original": "夜に駆ける", "additionalNames": ["Into The Night"]},
+            "artists": [{"artist": {"id": 999, "name": "YOASOBI"}}],
+            "lyrics": [
+                {
+                    "translationType": "Original",
+                    "cultureCode": "ja",
+                    "value": "夜に駆ける歌詞の一行目です。遠くの街の灯りを見つめながら、静かな夜の向こう側へ歩き続ける。\n二行目もそのまま保持します。窓に映る景色がゆっくり変わっていくたびに、昨日までの気持ちを思い出す。\n小さな声で名前を呼んだら、風が答えるように頬をそっと撫でていく。\nまだ知らない明日へ向かって、同じ歩幅で進んでいこう。\n遠い約束を胸に抱いて、朝が来るまで歌を続ける。\n何度でも振り返りながら、それでも前を向いて歩いていく。\n静かな夜の向こう側へ、消えない光を探しに行こう。"
+                },
+                {
+                    "translationType": "Romanized",
+                    "cultureCode": "ja-Latn",
+                    "value": "Yoru ni kakeru no uta no ichigyoume desu. Tooku no machi no akari o mitsumenagara, shizuka na yoru no mukougawa e aruki tsuzukeru.\nNigyome mo sono mama hoji shimasu. Mado ni utsuru keshiki ga yukkuri kawatte iku tabi ni, kinou made no kimochi o omoidasu.\nChiisana koe de namae o yondara, kaze ga kotaeru you ni hoo o sotto nadete iku.\nMada shiranai ashita e mukatte, onaji hohaba de susunde ikou.\nTooi yakusoku o mune ni daite, asa ga kuru made uta o tsuzukeru.\nNando demo furikaerinagara, soredemo mae o muite aruite iku.\nShizuka na yoru no mukougawa e, kienai hikari o sagashi ni ikou."
+                },
+                {
+                    "translationType": "Translation",
+                    "cultureCode": "en",
+                    "value": "The first translated lyric line stays separate and follows the quiet lights of a distant town into the night.\nThe second translated line remains separate while the view in the window slowly changes and brings yesterday back to mind.\nWhen a name is called in a small voice, the wind answers and gently brushes past.\nWe keep walking toward a tomorrow we have not yet seen, matching each other's steps.\nHolding a distant promise close, we continue singing until the morning arrives.\nWe look back again and again, but still choose to face forward and walk on.\nToward the other side of the quiet night, we go searching for a light that will not disappear."
+                }
+            ]
+        }
+    ]
+}

@@ -1,0 +1,9 @@
+{
+  "success": true,
+  "data": {
+    "id": "fixture-empty",
+    "song": "Unpublished Song",
+    "artist": "Fixture Artist",
+    "lyrics": ""
+  }
+}

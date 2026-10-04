@@ -1,0 +1,27 @@
+[Song]
+{
+  Name = "Fixture Song"
+  Artist = "Fixture Artist"
+  Resolution = 192
+  Offset = 0.5
+}
+[SyncTrack]
+{
+  0 = TS 4
+  0 = B 60000
+}
+[Events]
+{
+  0 = E "phrase_start"
+  192 = E "lyric Every"
+  384 = E "lyric word"
+  576 = E "lyric remains"
+  768 = E "lyric intact?="
+  960 = E "phrase_end"
+  1152 = E "phrase_start"
+  1152 = E "lyric through"
+  1344 = E "lyric the"
+  1536 = E "lyric quiet"
+  1728 = E "lyric night?"
+  1920 = E "phrase_end"
+}

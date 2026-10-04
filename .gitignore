@@ -1,0 +1,25 @@
+# Private configuration and local runtime state
+.env
+.env.*
+!.env.example
+.venv/
+.api_cache/
+.provider-cache/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+.agents/
+.codex/
+.aws/
+
+# Private session transcripts and generated verification artifacts
+codex-session-*.md
+song.*
+.metadata-transaction-*/
+.metadata-provenance.jsonl
+*.pending.flac
+*.rollback.flac
+*.replaygain.flac
+*.backup.flac

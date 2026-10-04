@@ -1,0 +1,13 @@
+{
+  "message": {
+    "header": {"status_code": 200, "execute_time": 0.01},
+    "body": {
+      "lyrics": {
+        "lyrics_id": 9876,
+        "lyrics_language": "en",
+        "lyrics_copyright": "Lyrics licensed by Musixmatch",
+        "lyrics_body": "[Verse 1]\nFirst line stays…\nRepeated line\nRepeated line\n\n******* This Lyrics is NOT for Commercial use *******\n"
+      }
+    }
+  }
+}

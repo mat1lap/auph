@@ -1,0 +1,16 @@
+{
+  "data": {
+    "song": {
+      "list": [
+        {
+          "songmid": "qq-track-1",
+          "songname": "Fixture Song",
+          "singer": [{"name": "Fixture Artist"}],
+          "albumname": "Fixture Album",
+          "albummid": "qq-album-1",
+          "interval": 246
+        }
+      ]
+    }
+  }
+}
