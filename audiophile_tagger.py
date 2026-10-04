@@ -1085,9 +1085,11 @@ def get_track_eac_peak(rip_meta_files: list[Path], track_num: int, flac_path: Pa
             audio = FLAC(str(flac_path))
             bps = audio.info.bits_per_sample
             cmd = ["flac", "-d", "-c", "-s", "--force-raw-format", "--endian=little", "--sign=signed", str(flac_path)]
-            proc = subprocess.run(cmd, capture_output=True, check=True)
+            proc = subprocess.run(cmd, capture_output=True, check=True, timeout=300)
             raw = proc.stdout
-            if bps == 16:
+            if bps == 8:
+                s = np.frombuffer(raw, dtype=np.int8).astype(np.float64) / 128.0
+            elif bps == 16:
                 s = np.frombuffer(raw, dtype=np.int16).astype(np.float64) / 32768.0
             elif bps == 24:
                 a = np.frombuffer(raw, dtype=np.uint8)
@@ -1115,6 +1117,7 @@ def compute_acoustid_fingerprint(flac_path: Path) -> tuple[int, str]:
             capture_output=True,
             text=True,
             check=True,
+            timeout=60,
         )
         data = json.loads(res.stdout)
         dur = round(float(data.get("duration", 0)))
@@ -1125,22 +1128,7 @@ def compute_acoustid_fingerprint(flac_path: Path) -> tuple[int, str]:
 
 
 def _rank_acoustid_results(payload: object) -> list[dict[str, Any]]:
-    if not isinstance(payload, dict) or payload.get("status") != "ok" or not isinstance(payload.get("results"), list):
-        return []
-    ranked: list[dict[str, Any]] = []
-    for row in payload["results"]:
-        if not isinstance(row, dict) or not row.get("id"):
-            continue
-        raw_score = row.get("score")
-        if not isinstance(raw_score, (float, int, str)) or isinstance(raw_score, bool):
-            continue
-        try:
-            score = float(raw_score)
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if math.isfinite(score) and load_config().matching.acoustid_min_score <= score <= 1.0:
-            ranked.append({**row, "score": score})
-    return sorted(ranked, key=lambda row: (-row["score"], str(row["id"])))
+    return mb_identity_score.rank_acoustid_results(payload, load_config().matching.acoustid_min_score)
 
 
 def resolve_acoustid_id(duration: int, fingerprint: str, session: requests.Session) -> str:
@@ -1189,67 +1177,51 @@ def get_acousticbrainz_data(
     if not recording_id:
         return res
 
-    ab_cache: JsonCache | None = None
-    if cache_dir:
-        ab_cache_dir = cache_dir / "acousticbrainz"
-        ab_cache = JsonCache(ab_cache_dir, ttl_seconds=90 * 24 * 3600)
-
-    headers = {"User-Agent": "AudiophileArchTagger/6.0 (audiophile@tagger.org)"}
-
-    # 1. Low-level data (BPM, Key)
-    low_data = None
+    ab_cache = JsonCache(
+        (cache_dir or Path(__file__).parent / ".api_cache") / "acousticbrainz", ttl_seconds=90 * 24 * 3600
+    )
+    headers = {"User-Agent": "AudiophileArchTagger/6.0"}
     low_url = f"https://acousticbrainz.org/api/v1/{recording_id}/low-level"
-    low_cached = ab_cache.load(low_url) if ab_cache else None
-    if low_cached and low_cached[0] == 200:
-        low_data = low_cached[1]
-    if not low_data:
-        try:
-            r = session.get(
-                low_url,
-                headers=headers,
-                timeout=5,
-            )
-            if r.status_code == 200:
-                low_data = r.json()
-                if ab_cache:
-                    ab_cache.store(low_url, low_data)
-        except Exception:
-            pass
-
+    low_result = fetch_json(session, low_url, headers=headers, cache=ab_cache, timeout=5)
+    low_data = low_result.payload if low_result.ok else None
     if isinstance(low_data, dict):
-        bpm_val = low_data.get("rhythm", {}).get("bpm")
+        rhythm = low_data.get("rhythm")
+        bpm_val = rhythm.get("bpm") if isinstance(rhythm, dict) else None
         if bpm_val is not None:
             try:
-                res["bpm"] = str(round(float(bpm_val)))
+                parsed_bpm = float(bpm_val)
+                if math.isfinite(parsed_bpm) and parsed_bpm > 0:
+                    res["bpm"] = str(round(parsed_bpm))
             except Exception:
                 pass
-        key_k = low_data.get("tonal", {}).get("key_key", "")
-        key_s = low_data.get("tonal", {}).get("key_scale", "")
+        raw_tonal = low_data.get("tonal")
+        tonal = raw_tonal if isinstance(raw_tonal, dict) else {}
+        key_k = tonal.get("key_key", "")
+        key_s = tonal.get("key_scale", "")
         if key_k:
             res["key"] = f"{key_k} {key_s}".strip() if key_s else key_k
 
     # 2. High-level data (Mood, Danceability)
-    high_data = None
     high_url = f"https://acousticbrainz.org/api/v1/{recording_id}/high-level"
-    high_cached = ab_cache.load(high_url) if ab_cache else None
-    if high_cached and high_cached[0] == 200:
-        high_data = high_cached[1]
-    if not high_data:
-        try:
-            r = session.get(
-                high_url,
-                headers=headers,
-                timeout=5,
-            )
-            if r.status_code == 200:
-                high_data = r.json()
-                if ab_cache:
-                    ab_cache.store(high_url, high_data)
-        except Exception:
-            pass
-
+    high_result = fetch_json(session, high_url, headers=headers, cache=ab_cache, timeout=5)
+    high_data = high_result.payload if high_result.ok else None
     if isinstance(high_data, dict):
-        hl = high_data.get("highlevel", {})
+        raw_highlevel = high_data.get("highlevel")
+        raw_models = raw_highlevel if isinstance(raw_highlevel, dict) else {}
+        hl: dict[str, dict[str, Any]] = {}
+        for name, model in raw_models.items():
+            if not isinstance(model, dict):
+                continue
+            try:
+                probability = float(model.get("probability", 0))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if not math.isfinite(probability) or not 0 <= probability <= 1:
+                continue
+            value = model.get("value", "")
+            if not isinstance(value, str):
+                continue
+            hl[name] = {"value": value, "probability": probability}
         dance = hl.get("danceability", {})
         if dance.get("value") == "danceable" and dance.get("probability", 0) >= 0.5:
             res["danceability"] = "1"
@@ -1327,7 +1299,7 @@ def compute_bpm_from_pcm(flac_path: Path) -> str:
             return ""
 
         cmd = ["flac", "-d", "-c", "-s", "--force-raw-format", "--endian=little", "--sign=signed", str(flac_path)]
-        proc = subprocess.run(cmd, capture_output=True, check=True)
+        proc = subprocess.run(cmd, capture_output=True, check=True, timeout=300)
         raw = proc.stdout
         if bps == 16:
             samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
@@ -1364,6 +1336,8 @@ def compute_bpm_from_pcm(flac_path: Path) -> str:
         end = min(len(env), start + seg_len)
         seg = env[start:end]
 
+        if np.max(np.abs(seg)) <= 1e-12:
+            return ""
         corr = np.correlate(seg, seg, mode="full")
         corr = corr[len(seg) - 1 :]
         lags = np.arange(min_lag, max_lag)
@@ -3125,6 +3099,7 @@ def run_loudgain(
     if not complete_album and not quiet:
         print("  -> REPLAYGAIN: album completeness unverified; scanning individual tracks only.")
     preserve_track_only = False
+    cleanup_only = False
     strip_inconsistent_album = False
     if loudness_policy.preserve_existing_measurements:
         # A malformed/unreadable input is left to the normal staged loudgain
@@ -3157,7 +3132,10 @@ def run_loudgain(
                 strip_inconsistent_album = True
         if not complete_album and existing and all(valid for valid, _errors in existing):
             has_stale_album_gain = any(
-                any(field in FLAC(path) for field in ("REPLAYGAIN_ALBUM_GAIN", "REPLAYGAIN_ALBUM_PEAK"))
+                any(
+                    field in FLAC(path)
+                    for field in ("REPLAYGAIN_ALBUM_GAIN", "REPLAYGAIN_ALBUM_PEAK", "REPLAYGAIN_ALBUM_RANGE")
+                )
                 for path in flac_files
             )
             if not has_stale_album_gain:
@@ -3167,6 +3145,20 @@ def run_loudgain(
                     print("  -> REPLAYGAIN: preserved valid existing track measurements.")
                 return False
             preserve_track_only = True
+    if not lg_bin and not preserve_track_only and not complete_album:
+        # Album measurements cannot describe a known incomplete/unknown set,
+        # even if no usable track measurements or scanner are available.
+        try:
+            cleanup_only = any(
+                any(
+                    field in FLAC(path)
+                    for field in ("REPLAYGAIN_ALBUM_GAIN", "REPLAYGAIN_ALBUM_PEAK", "REPLAYGAIN_ALBUM_RANGE")
+                )
+                for path in flac_files
+            )
+        except (OSError, ValueError):
+            cleanup_only = False
+        preserve_track_only = cleanup_only
     if not lg_bin and not preserve_track_only:
         if outcome is not None:
             outcome["status"] = "unavailable"
@@ -3209,7 +3201,9 @@ def run_loudgain(
                 print(f"[VERBOSE][LOUDGAIN] Binary path: {lg_bin}")
                 print(f"[VERBOSE][LOUDGAIN] Executing: {' '.join(cmd[:5])} [{len(flac_files)} FLAC tracks]")
 
-            proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            proc = subprocess.run(
+                cmd, check=True, capture_output=True, text=True, timeout=max(300, 300 * len(flac_files))
+            )
             if is_verbose:
                 for line in [line.strip() for line in proc.stdout.splitlines() if line.strip()]:
                     print(f"[VERBOSE][LOUDGAIN] {line}")
@@ -3224,11 +3218,11 @@ def run_loudgain(
             valid, errors = loudness.validate_replaygain(
                 pending, require_album=complete_album and not strip_inconsistent_album
             )
-            if not valid:
+            if not valid and not cleanup_only:
                 validation_errors.extend(f"{original.name}: {error}" for error in errors)
             if not complete_album or strip_inconsistent_album:
                 audio = FLAC(pending)
-                for field in ("REPLAYGAIN_ALBUM_GAIN", "REPLAYGAIN_ALBUM_PEAK"):
+                for field in ("REPLAYGAIN_ALBUM_GAIN", "REPLAYGAIN_ALBUM_PEAK", "REPLAYGAIN_ALBUM_RANGE"):
                     if field in audio:
                         del audio[field]
                 audio.save()
@@ -3267,7 +3261,11 @@ def run_loudgain(
                     + "; ".join(rollback_errors)
                 ) from exc
             raise
-        if preserve_track_only and not quiet:
+        if cleanup_only and not quiet:
+            print(
+                "  -> REPLAYGAIN: scanner unavailable; cleared unverified album values, leaving existing track tags unverified."
+            )
+        elif preserve_track_only and not quiet:
             print("  -> REPLAYGAIN: preserved track measurements and cleared unverified album values.")
         elif is_verbose:
             print(
@@ -3279,7 +3277,7 @@ def run_loudgain(
             outcome.update(
                 status="updated",
                 tool="existing-tags" if preserve_track_only else "loudgain",
-                mode="track-preserved" if preserve_track_only else scan_mode,
+                mode="album-tags-cleared" if cleanup_only else "track-preserved" if preserve_track_only else scan_mode,
             )
         return True
     except subprocess.CalledProcessError as exc:
@@ -3304,22 +3302,23 @@ def run_loudgain(
 
 
 def commit_provenance_ledger(final_ledger: Path, pending_ledger: Path) -> None:
-    """Atomically merge a staged ledger, so rollback cannot leave false rows."""
-    if final_ledger.is_symlink():
-        raise ValueError(f"refusing symlinked provenance ledger: {final_ledger}")
-    old = final_ledger.read_bytes() if final_ledger.is_file() else b""
-    pending = pending_ledger.read_bytes()
-    fd, temporary = tempfile.mkstemp(prefix=f".{final_ledger.name}.", suffix=".pending", dir=final_ledger.parent)
+    """Publish the merged ledger with rollback on a catchable interruption."""
+    metadata_writer.publish_provenance_bytes(final_ledger, pending_ledger.read_bytes())
+
+
+def publish_new_artifact(source: Path, destination: Path, published: list[Path]) -> None:
+    """Publish on the staging filesystem without clobbering a late user file.
+
+    Retain the source link until transaction cleanup. A catchable interruption
+    after link creation still records the destination for rollback.
+    """
     try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(old)
-            handle.write(pending)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, final_ledger)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        os.link(source, destination, follow_symlinks=False)
+    except BaseException:
+        if destination.exists() and not destination.is_symlink() and os.path.samefile(source, destination):
+            published.append(destination)
+        raise
+    published.append(destination)
 
 
 def stage_album_files(
@@ -4216,11 +4215,7 @@ def process_album(
         total_discs = int(disc_qty)
 
     exact_release_disc_counts = (
-        {
-            int(medium.get("position") or index): int(medium.get("track-count") or 0)
-            for index, medium in enumerate((mb_recordings_json or {}).get("media") or [], start=1)
-            if isinstance(medium, dict) and int(medium.get("track-count") or 0) > 0
-        }
+        release_match.release_disc_counts((mb_recordings_json or {}).get("media") or [])
         if mb_match_kind in release_match.ACCEPTABLE
         else None
     )
@@ -4793,8 +4788,8 @@ def process_album(
                 backup.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(original, backup)
             for original in flac_files:
-                os.replace(pending_files[original], original)
                 committed.append(original)
+                os.replace(pending_files[original], original)
             # Lyrics are staged beside their disposable FLAC and are copied
             # only after every audio replacement has succeeded. `_safe_path`
             # ensures these are new candidate files, never overwrites local
@@ -4810,8 +4805,7 @@ def process_album(
                         continue
                     raise RuntimeError(f"refusing to overwrite existing sidecar during commit: {destination.name}")
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(staged_sidecar, destination)
-                committed_sidecars.append(destination)
+                publish_new_artifact(staged_sidecar, destination, committed_sidecars)
             if cover_tmp.is_file() and (not cover_file.exists() or replace_cover_file):
                 if cover_file.exists():
                     cover_backup.parent.mkdir(parents=True, exist_ok=True)
@@ -4820,13 +4814,16 @@ def process_album(
                     previous_cover = folder / f"cover.previous.{previous_digest}{cover_file.suffix.lower()}"
                     if previous_cover.is_symlink():
                         raise RuntimeError(f"refusing symlinked artwork backup: {previous_cover}")
-                    if not previous_cover.exists():
-                        shutil.copy2(cover_file, previous_cover)
-                        committed_sidecars.append(previous_cover)
+                    if previous_cover.exists():
+                        if previous_cover.read_bytes() != cover_file.read_bytes():
+                            raise FileExistsError(f"artwork backup collision: {previous_cover}")
+                    else:
+                        publish_new_artifact(cover_backup, previous_cover, committed_sidecars)
                     cover_was_replaced = True
-                os.replace(cover_tmp, cover_file)
-                if not cover_was_replaced:
-                    committed_sidecars.append(cover_file)
+                if cover_was_replaced:
+                    os.replace(cover_tmp, cover_file)
+                else:
+                    publish_new_artifact(cover_tmp, cover_file, committed_sidecars)
             if cover_source_tmp and cover_source_tmp.is_file():
                 source_destination = folder / f"cover.original{cover_source_tmp.suffix.lower()}"
                 if source_destination.is_symlink():
@@ -4838,15 +4835,21 @@ def process_album(
                     )
                 if source_destination.is_symlink():
                     raise RuntimeError(f"refusing symlinked artwork archive: {source_destination}")
-                if not source_destination.exists():
-                    os.replace(cover_source_tmp, source_destination)
-                    committed_sidecars.append(source_destination)
+                if source_destination.exists():
+                    if source_destination.read_bytes() != cover_source_tmp.read_bytes():
+                        raise FileExistsError(f"artwork archive collision: {source_destination}")
+                else:
+                    publish_new_artifact(cover_source_tmp, source_destination, committed_sidecars)
             if pending_ledger.is_file():
                 final_ledger = folder / ".metadata-provenance.jsonl"
                 commit_provenance_ledger(final_ledger, pending_ledger)
-        except Exception as exc:
+        except BaseException as exc:
             rollback_errors: list[str] = []
             for original in committed:
+                # A replacement that raised before publication still has its
+                # staged source. Do not retry that failed destination in rollback.
+                if pending_files[original].exists():
+                    continue
                 backup = backup_root / original.relative_to(folder)
                 try:
                     if not backup.is_file():
@@ -4873,10 +4876,14 @@ def process_album(
                     f"Preserved recovery files in {transaction_dir}: {'; '.join(rollback_errors)}",
                     file=sys.stderr,
                 )
+                if not isinstance(exc, Exception):
+                    raise
                 return False
             discard_cover_staging()
             discard_transaction()
             print(f"ERROR: Album commit failed and was rolled back: {exc}", file=sys.stderr)
+            if not isinstance(exc, Exception):
+                raise
             return False
         print("  -> POST-VERIFY: core tags, DR14, and duplicate guards passed.")
         discard_transaction()
@@ -4966,6 +4973,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("patterns", nargs="*", help="Album folders, glob patterns, or keywords")
 
     args = parser.parse_args(argv)
+    try:
+        load_config()
+    except (OSError, ValueError, TypeError) as exc:
+        parser.error(f"invalid policy configuration: {exc}")
     if args.manual_covers and args.auto_covers:
         parser.error("--manual-covers and --auto-covers cannot be combined")
     if args.threads < 1:

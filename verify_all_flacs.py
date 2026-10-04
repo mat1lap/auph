@@ -20,13 +20,13 @@ from library_files import abandoned_transactions, iter_library_flacs
 from lyrics_quality import lrc_to_plain, validate_lrc
 from metadata_schema import (
     ALIASES,
-    DATE_RE,
     ISRC_RE,
     MULTI_VALUED_FIELDS,
     MULTILINE_FIELDS,
     SINGLE_VALUED_FIELDS,
     STABLE_ID_FIELDS,
     UUID_RE,
+    valid_date,
 )
 
 SINGLE_VALUED_TAGS = set(SINGLE_VALUED_FIELDS) | set(MULTILINE_FIELDS)
@@ -82,9 +82,13 @@ class TrackAuditResult:
 
 def verify_audio_stream(path: Path) -> list[str]:
     try:
-        result = subprocess.run(["flac", "-t", "-s", str(path)], capture_output=True, text=True, check=False)
+        result = subprocess.run(
+            ["flac", "-t", "-s", str(path)], capture_output=True, text=True, check=False, timeout=300
+        )
     except FileNotFoundError:
         return ["flac binary not found in PATH"]
+    except subprocess.TimeoutExpired:
+        return ["FLAC stream verification timed out after 300 seconds"]
     if result.returncode:
         return [f"FLAC stream corrupted (flac -t returned {result.returncode}): {result.stderr.strip()}"]
     return []
@@ -200,7 +204,7 @@ def audit_flac(flac_path: Path, *, check_stream: bool = True) -> TrackAuditResul
             result.add(Severity.INFORMATIONAL, "schema.alias_compatible", f"Compatible {canonical}/{alias} aliases")
 
     for name in ("DATE", "ORIGINALDATE", "RECORDINGDATE"):
-        if first(name) and not DATE_RE.fullmatch(first(name)):
+        if first(name) and not valid_date(first(name)):
             result.add(Severity.HIGH, "date.invalid", f"Invalid {name} format: {first(name)!r}")
     if first("DATE") and first("ORIGINALDATE") and first("ORIGINALDATE")[:4] > first("DATE")[:4]:
         result.add(Severity.HIGH, "date.order", "ORIGINALDATE is later than edition DATE")

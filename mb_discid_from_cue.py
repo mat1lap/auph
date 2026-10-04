@@ -19,6 +19,7 @@ from pathlib import Path
 from mutagen.flac import FLAC
 
 from library_files import is_pipeline_private, iter_library_flacs
+from library_layout import position_evidence
 
 ENCODINGS = ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "cp1252", "latin-1")
 
@@ -103,7 +104,12 @@ def parse_cue(cue: Path) -> list[dict]:
             all_tracks[-1]["index01"] = val
             if all_tracks[-1]["mode"] == "AUDIO":
                 tracks[-1]["index01"] = val
-    valid_tracks = [t for t in tracks if t["index01"] is not None]
+    if any(t["index01"] is None for t in tracks):
+        raise ValueError("audio TRACK is missing INDEX 01 in CUE")
+    numbers = [int(str(t["number"])) for t in tracks]
+    if len(numbers) != len(set(numbers)) or numbers != sorted(numbers):
+        raise ValueError("CUE audio track numbers are duplicated or out of order")
+    valid_tracks = tracks
     if not valid_tracks:
         raise ValueError("No audio TRACK/INDEX 01 entries found in CUE")
     return valid_tracks
@@ -203,9 +209,28 @@ def mb_id(first: int, last: int, leadout: int, offsets: list[int]) -> str:
     )
 
 
-def build_from_flac_dir(folder: Path) -> dict:
+def build_from_flac_dir(folder: Path, *, files: list[Path] | None = None) -> dict:
     """Build TOC and durations directly from FLAC files in a folder when no CUE exists."""
-    flac_files = sorted(folder.glob("*.flac"), key=lambda p: p.name.lower())
+    flac_files = (
+        files
+        if files is not None
+        else [
+            path
+            for path in folder.iterdir()
+            if path.is_file()
+            and path.suffix.casefold() == ".flac"
+            and not path.is_symlink()
+            and not is_pipeline_private(path)
+        ]
+    )
+    numbered: list[tuple[int, Path]] = []
+    for path in flac_files:
+        audio = FLAC(path)
+        _disc, number, _title, conflicts = position_evidence(path, folder, audio.tags)
+        if conflicts:
+            raise ValueError(f"conflicting track position in {path.name}: {'; '.join(conflicts)}")
+        numbered.append((number if number is not None else 1000, path))
+    flac_files = [path for _number, path in sorted(numbered, key=lambda item: (item[0], item[1].name.casefold()))]
     if not flac_files:
         raise ValueError(f"No CUE or FLAC files found in directory: {folder}")
 
@@ -461,28 +486,32 @@ def build_all(folder: Path) -> dict[int, dict]:
     Disc IDs and physical evidence attached to the correct files.
     """
     cues = sorted(
-        (p for p in folder.rglob("*.cue") if p.is_file() and not is_pipeline_private(p, root=folder)),
+        (
+            p
+            for p in folder.rglob("*")
+            if p.suffix.casefold() == ".cue"
+            and p.is_file()
+            and not p.is_symlink()
+            and not is_pipeline_private(p, root=folder)
+        ),
         key=lambda p: str(p).casefold(),
     )
     if not cues:
-        by_disc: dict[int, Path] = {}
+        by_disc: dict[int, list[Path]] = {}
         for flac_path in iter_library_flacs(folder):
-            disc = 1
-            try:
-                audio = FLAC(str(flac_path))
-                tags = audio.tags
-                raw = (tags.get("DISCNUMBER", [""]) if tags is not None else [""])[0]
-                if str(raw).split("/", 1)[0].strip().isdigit():
-                    disc = int(str(raw).split("/", 1)[0].strip())
-            except (OSError, ValueError):
-                pass
-            previous = by_disc.get(disc)
-            if previous is not None and previous != flac_path.parent:
+            if flac_path.is_symlink():
+                raise ValueError(f"refusing symlinked TOC input: {flac_path}")
+            audio = FLAC(flac_path)
+            disc, _track, _title, conflicts = position_evidence(flac_path, folder, audio.tags)
+            if conflicts:
+                raise ValueError(f"conflicting disc position in {flac_path.name}: {'; '.join(conflicts)}")
+            group = by_disc.setdefault(disc or 1, [])
+            if group and group[0].parent != flac_path.parent:
                 raise ValueError(f"disc {disc} spans folders without CUE evidence; refusing synthetic cross-folder TOC")
-            by_disc[disc] = flac_path.parent
+            group.append(flac_path)
         if not by_disc:
             raise ValueError(f"No CUE or FLAC files found in directory: {folder}")
-        return {disc: build_from_flac_dir(parent) for disc, parent in sorted(by_disc.items())}
+        return {disc: build_from_flac_dir(group[0].parent, files=group) for disc, group in sorted(by_disc.items())}
     result: dict[int, dict] = {}
     next_disc = 1
     for cue_path in cues:

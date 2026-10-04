@@ -17,7 +17,9 @@ import difflib
 import json
 import os
 import re
+import subprocess
 import sys
+import unicodedata
 import urllib.parse
 from collections.abc import Sequence
 from pathlib import Path
@@ -28,6 +30,7 @@ from mutagen.flac import FLAC
 
 from library_files import is_pipeline_private, iter_library_flacs
 from mb_discid_from_cue import build, read_text_robust
+from mb_identity_score import rank_acoustid_results
 from pipeline_config import load_config
 from provider_cache import DISCOGS_LIMITER, MUSICBRAINZ_LIMITER, JsonCache, fetch_json
 
@@ -36,7 +39,7 @@ _MB_LIMITER = MUSICBRAINZ_LIMITER
 
 
 def norm(s: object) -> str:
-    return re.sub(r"[^\w]+", "", str(s or "").casefold(), flags=re.UNICODE)
+    return re.sub(r"[^\w]+", "", unicodedata.normalize("NFC", str(s or "")).casefold(), flags=re.UNICODE)
 
 
 def catnorm(s: object) -> str:
@@ -406,11 +409,14 @@ class DiscogsFinder:
                             res = (r_rel.get("url") or {}).get("resource", "")
                             m = re.search(r"discogs\.com/release/(\d+)", res)
                             if m:
-                                record_candidate(m.group(1), f"MB-DiscID-relation({discid[:8]})", bonus=1000)
-                        for l_info in rel_detail.get("label-info", []):
-                            cn = l_info.get("catalog-number")
-                            if cn and cn.strip() and any(c.isdigit() for c in cn):
-                                local["catnos"].append(cn.strip())
+                                record_candidate(
+                                    m.group(1),
+                                    f"MB-DiscID-relation({discid[:8]})",
+                                    bonus=1000
+                                    if local.get("toc_info", {}).get("toc_exact") is True
+                                    and not local.get("toc_info", {}).get("is_partial")
+                                    else 100,
+                                )
 
         # Tier 1.5: AcoustID MusicBrainz Bridge (Acoustic audio fingerprint -> MB release -> Discogs URL)
         acoustid_api_key = os.environ.get("ACOUSTID_API_KEY") or os.environ.get("ACOUSTID_CLIENT_KEY")
@@ -427,8 +433,6 @@ class DiscogsFinder:
                 if audio.info and audio.info.length:
                     dur = round(audio.info.length)
                 if not fp or dur <= 0:
-                    import subprocess
-
                     proc = subprocess.run(
                         ["fpcalc", "-json", str(first_flac)], capture_output=True, text=True, timeout=15
                     )
@@ -444,39 +448,43 @@ class DiscogsFinder:
                         "duration": dur,
                         "fingerprint": fp,
                     }
-                    acoust_resp = self.session.get(
-                        acoust_url,
-                        params=acoustid_params,
+                    response = fetch_json(
+                        self.session,
+                        acoust_url + "?" + urllib.parse.urlencode(acoustid_params),
+                        headers={"User-Agent": "AudiophileArchTagger/6.0"},
+                        cache=JsonCache(self.cache_dir_mb / "acoustid"),
                         timeout=8,
                     )
-                    if acoust_resp.status_code == 200:
-                        adata = acoust_resp.json()
-                        for ares in adata.get("results", [])[:1]:
-                            for arec in ares.get("recordings", [])[:2]:
-                                for arel in arec.get("releases", [])[:4]:
-                                    rel_id = arel.get("id")
-                                    if not rel_id:
-                                        continue
-                                    mb_rel_url = (
-                                        f"https://musicbrainz.org/ws/2/release/{rel_id}?inc=url-rels+labels&fmt=json"
-                                    )
-                                    rel_detail = self.mb_api_get(mb_rel_url)
-                                    if rel_detail:
-                                        for r_rel in rel_detail.get("relations", []):
-                                            res = (r_rel.get("url") or {}).get("resource", "")
-                                            m = re.search(r"discogs\.com/release/(\d+)", res)
-                                            if m:
-                                                record_candidate(
-                                                    m.group(1),
-                                                    f"AcoustID-MB-relation({arel.get('title', 'release')})",
-                                                    bonus=850,
-                                                )
-                                        for l_info in rel_detail.get("label-info", []):
-                                            cn = l_info.get("catalog-number")
-                                            if cn and cn.strip() and any(c.isdigit() for c in cn):
-                                                local["catnos"].append(cn.strip())
-            except Exception:
-                pass
+                    if response.ok:
+                        ranked = rank_acoustid_results(response.payload, load_config().matching.acoustid_min_score)
+                        release_ids = sorted(
+                            {
+                                str(release["id"])
+                                for result in ranked
+                                for recording in result.get("recordings", [])
+                                if isinstance(recording, dict)
+                                for release in recording.get("releases", [])
+                                if isinstance(release, dict) and release.get("id")
+                            }
+                        )
+                        if len(release_ids) > 20:
+                            print(
+                                "WARNING: AcoustID release bridge truncated to 20 distinct confident candidates.",
+                                file=sys.stderr,
+                            )
+                        for rel_id in release_ids[:20]:
+                            mb_rel_url = f"https://musicbrainz.org/ws/2/release/{rel_id}?inc=url-rels+labels&fmt=json"
+                            rel_detail = self.mb_api_get(mb_rel_url)
+                            if rel_detail:
+                                for r_rel in rel_detail.get("relations", []):
+                                    resource = (r_rel.get("url") or {}).get("resource", "")
+                                    match = re.search(r"discogs\.com/release/(\d+)", resource)
+                                    if match:
+                                        record_candidate(match.group(1), f"AcoustID-MB-relation({rel_id})", bonus=850)
+                    elif not self.quiet:
+                        print(f"WARNING: AcoustID discovery: {response.classification}", file=sys.stderr)
+            except (OSError, ValueError, TypeError, requests.RequestException, subprocess.SubprocessError) as exc:
+                print(f"WARNING: AcoustID discovery failed: {type(exc).__name__}", file=sys.stderr)
 
         # Tier 2: Catalog Number & Barcode direct search in Discogs
         seen_cat_searches: set[str] = set()
@@ -576,7 +584,8 @@ class DiscogsFinder:
         if not data or not isinstance(data, dict):
             return {"id": release_id, "score": -9999, "rejected": True, "reason": "fetch_failed"}
 
-        score = bridge_bonus
+        # Discovery route affects retrieval order, never edition confidence.
+        score = 0
         reasons: list[str] = list(origins)
         rejected = False
         reject_reason = ""
@@ -639,7 +648,7 @@ class DiscogsFinder:
         local_durs = local.get("durations", [])
 
         if cand_valid_durs and local_durs:
-            compare_len = min(len(cand_valid_durs), len(local_durs))
+            compare_len = min(len(candidate_durations), len(local_durs))
             deltas = []
             for i in range(compare_len):
                 if candidate_durations[i] is not None:
@@ -813,12 +822,17 @@ class DiscogsFinder:
         sorted_raw = sorted(raw_candidates.items(), key=lambda item: (-item[1].get("bridge_bonus", 0), str(item[0])))
 
         scored_candidates: list[dict[str, Any]] = []
+        if len(sorted_raw) > 50:
+            print(
+                f"WARNING: Discogs edition scoring truncated to 50 of {len(sorted_raw)} discovered candidates.",
+                file=sys.stderr,
+            )
         for rid, meta in sorted_raw[:50]:
             sc = self.score_candidate(rid, local, meta.get("bridge_bonus", 0), meta.get("origins", []))
             if not sc.get("rejected"):
                 scored_candidates.append(sc)
 
-        scored_candidates.sort(key=lambda c: -c["score"])
+        scored_candidates.sort(key=lambda c: (-c["score"], str(c["id"])))
 
         best = scored_candidates[0] if scored_candidates else None
         second = scored_candidates[1] if len(scored_candidates) > 1 else None
@@ -826,7 +840,7 @@ class DiscogsFinder:
         safe = bool(
             best
             and best.get("confidence") in {"HIGH", "EXACT", "CERTAIN"}
-            and (best.get("confidence") == "CERTAIN" or margin >= load_config().matching.discogs_min_margin)
+            and margin >= load_config().matching.discogs_min_margin
         )
         return {
             "ok": safe,
@@ -863,12 +877,12 @@ def find_album_folders(paths: Sequence[str | Path], base_dir: Path | None = None
     base = (base_dir or Path.cwd()).resolve()
 
     def process_dir(root: Path) -> None:
-        if not root.is_dir():
+        if root.is_symlink() or not root.is_dir():
             return
         if is_pipeline_private(root, root=base):
             return
         # If directory contains .flac files directly
-        if any(root.glob("*.flac")):
+        if any(p.is_file() and not p.is_symlink() and p.suffix.casefold() == ".flac" for p in root.iterdir()):
             if disc_pattern.match(root.name) and root.parent.exists() and root.parent != base:
                 album_dirs.add(root.parent.resolve())
             else:
@@ -877,8 +891,10 @@ def find_album_folders(paths: Sequence[str | Path], base_dir: Path | None = None
 
         # Check subdirectories containing flacs (depth-first recursive)
         for flac in iter_library_flacs(root):
+            if flac.is_symlink():
+                continue
             parent = flac.parent.resolve()
-            if disc_pattern.match(parent.name) and parent.parent.exists() and parent.parent != root:
+            if disc_pattern.match(parent.name) and parent.parent.exists() and parent.parent != base:
                 album_dirs.add(parent.parent.resolve())
             else:
                 album_dirs.add(parent)
@@ -890,6 +906,8 @@ def find_album_folders(paths: Sequence[str | Path], base_dir: Path | None = None
         p = Path(raw_str)
         if not p.is_absolute():
             p = base / p
+        if p.is_symlink() or is_pipeline_private(p, root=base):
+            continue
         if p.exists():
             if p.is_file():
                 if p.suffix.lower() == ".flac":
@@ -901,12 +919,12 @@ def find_album_folders(paths: Sequence[str | Path], base_dir: Path | None = None
             clean_term = raw_str.strip("\"'")
             matched = False
             for d in base.rglob(f"*{clean_term}*"):
-                if d.is_dir():
+                if d.is_dir() and not d.is_symlink():
                     process_dir(d.resolve())
                     matched = True
             if not matched:
                 for d in base.glob(f"*{clean_term}*"):
-                    if d.is_dir():
+                    if d.is_dir() and not d.is_symlink():
                         process_dir(d.resolve())
 
     return sorted(album_dirs, key=lambda p: str(p).lower())

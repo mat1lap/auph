@@ -9,13 +9,36 @@ from __future__ import annotations
 
 import difflib
 import json
+import math
 import re
 import sys
+import unicodedata
 from pathlib import Path
+from typing import Any
+
+
+def rank_acoustid_results(payload: object, minimum_score: float) -> list[dict[str, Any]]:
+    """Keep confident finite fingerprint hits without trusting provider order."""
+    if not isinstance(payload, dict) or payload.get("status") != "ok" or not isinstance(payload.get("results"), list):
+        return []
+    ranked: list[dict[str, Any]] = []
+    for row in payload["results"]:
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        raw_score = row.get("score")
+        if not isinstance(raw_score, (float, int, str)) or isinstance(raw_score, bool):
+            continue
+        try:
+            score = float(raw_score)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(score) and minimum_score <= score <= 1.0:
+            ranked.append({**row, "score": score})
+    return sorted(ranked, key=lambda row: (-row["score"], str(row["id"])))
 
 
 def norm(value: object) -> str:
-    return re.sub(r"[^\w]+", "", str(value or "").casefold(), flags=re.UNICODE)
+    return re.sub(r"[^\w]+", "", unicodedata.normalize("NFC", str(value or "")).casefold(), flags=re.UNICODE)
 
 
 def catnorm(value: object) -> str:
@@ -359,6 +382,11 @@ def evaluate_identity(
         "discid_query_match": discid_exact,
     }
 
+    # A lookup hit is not physical evidence when the local TOC was synthesized.
+    authentic_toc = bool(toc and toc.get("toc_exact") is True and not toc.get("is_partial"))
+    discid_exact = bool(discid_exact and authentic_toc)
+    flags["discid_query_match"] = discid_exact
+
     # --- Medium selection and TOC layout analysis ---
     media = [m for m in M.get("media") or [] if isinstance(m, dict)]
     selected: dict | None = None
@@ -381,7 +409,7 @@ def evaluate_identity(
         for medium in media:
             if local_discid in medium_disc_ids(medium):
                 selected = medium
-                medium_discid_exact = True
+                medium_discid_exact = authentic_toc
                 break
     else:
         local_discid = ""

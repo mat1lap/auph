@@ -79,7 +79,8 @@ Review `REVIEW_REQUIRED` decisions and provider evidence for rare editions.
   non-partial physical TOC may populate that field.
 - Repeatable fields are stored as repeated Vorbis comments, not flattened with
   semicolons.
-- Stored text is NFC-normalized without typography/capitalization rewriting.
+- Metadata comparison/storage uses NFC without typography/capitalization rewriting.
+  Lyric source forms retain their original Unicode normalization and framing.
 - Missing optional facts are omitted; placeholders such as `Unknown` are not
   fabricated.
 - Edition descriptions use `EDITION`. `VERSION` is reserved for a recording or
@@ -101,9 +102,12 @@ duration, track position and available fingerprints. Major duration or version
 conflicts are hard failures. Nested `CD1`, `Disc 2`, and similar layouts use
 per-disc positions and totals.
 
-Artwork is identity-gated before aesthetic scoring. Exact-release or local
-artwork may be selected automatically; release-group and digital-service art is
-concept-level and remains a manual choice.
+Artwork is identity-gated before aesthetic scoring. Selection prefers the
+highest eligible release tier. If exact/local artwork is unavailable, automatic
+mode can use eligible release-group or title-matched service artwork; this is
+weaker evidence, not a verified edition match. Existing covers retain the
+separate conservative replacement policy. Manual mode exposes eligible
+alternatives and their evidence.
 
 Cover discovery keeps original and preview URLs separate. Candidates are
 compared by release tier, cover role, then measured image quality; provider
@@ -145,8 +149,10 @@ Python 3.11 or later is required. Install the tested Python dependencies with
 `python3 -m pip install -r requirements.txt`; for development checks use
 `python3 -m pip install -r requirements-dev.txt`. FLAC stream verification
 requires the `flac` executable. Generated audio fixtures use `ffmpeg`.
-ReplayGain requires `loudgain`; when it is unavailable, the command reports
-that ReplayGain was skipped. If existing album ReplayGain values disagree
+ReplayGain requires `loudgain`; when it is unavailable, new gain calculation is
+skipped. For incomplete/unknown albums, stale album gain/peak/range tags are
+cleared even when track measurements are missing; this cleanup does not claim
+to have scanned or validated the retained track tags. If existing album ReplayGain values disagree
 between tracks, the command recalculates them when possible; without the
 scanner it retains valid track values and removes the inconsistent album
 values. A failed scan aborts the staged album update. The native DR path does
@@ -161,6 +167,9 @@ non-finite numeric values. Incomplete rollback retains recovery copies for
 manual inspection rather than deleting them.
 
 Edit `metadata_policy.toml` or set `AUDIOPHILE_CONFIG` to another policy file.
+Explicit missing files, unknown settings, wrong types, non-finite/negative
+thresholds and unsupported destructive preservation settings are rejected.
+Changes to a policy file invalidate the in-process configuration cache.
 The shipped defaults are preservation-safe:
 
 ```toml
@@ -173,7 +182,7 @@ acoustid_min_score = 0.80
 [lyrics]
 online_lookup = true
 generated_candidates = false
-minimum_candidate_score = 35.0
+minimum_candidate_score = 75.0
 
 [loudness]
 enabled = true
@@ -306,3 +315,23 @@ the compatibility policy for a whole library.
   synced text is stored in `LYRICS`, `SYNCEDLYRICS`, and `SYNCELYRICS`; plain
   text is stored in `UNSYNCEDLYRICS`. Raw provider evidence remains sidecar
   material and section labels are removed only from display derivatives.
+
+## Whole-project verification
+
+See [WHOLE_PROJECT_AUDIT.md](WHOLE_PROJECT_AUDIT.md) for the October 4 audit,
+confirmed defects, module coverage, temporary-fixture validation and remaining
+limits. [SELECTION_AUDIT.md](SELECTION_AUDIT.md) contains the detailed lyrics/art
+provider and failure matrices; fixture coverage does not certify live services.
+
+Album publication remains several individual operations. Catchable commit
+interruptions attempt rollback; process termination/power loss still requires
+manual recovery. New sidecars/reports/archives are published exclusively so a
+late destination collision aborts rather than overwriting another application's
+file. This requires hard-link support on the staging filesystem; unsupported
+filesystems fail safely and trigger rollback.
+
+Native DR14 now reports measured short-track/mono peak and sine-reference RMS,
+handles silence, and excludes phantom empty blocks. Values may differ from old
+reports; preserved existing reports are not automatically rewritten. Partial
+measurement withholds album DR, and the measurement CLI returns nonzero on
+failure. Exact agreement with proprietary DR meters has not been certified.

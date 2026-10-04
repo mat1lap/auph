@@ -13,6 +13,7 @@ import json
 import re
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -24,29 +25,28 @@ UNIT_RE = r"(?:dB|дБ|дб|DB|db)"
 
 
 def compute_dr14_samples(samples: np.ndarray, fs: int) -> tuple[int, str, str]:
-    """Compute exact DR14, peak dB, and RMS dB per Pleasurize Music Foundation standard."""
+    """Compute block-based DR14 and measured sine-reference peak/RMS levels.
+
+    This follows the dr14_tmeter approach, including its 44.1 kHz block
+    adjustment. It is not a certification of agreement with a proprietary meter.
+    """
+    if fs <= 0 or samples.ndim not in {1, 2} or not samples.size or not np.isfinite(samples).all():
+        raise ValueError("DR measurement requires nonempty finite PCM and a positive sample rate")
     if len(samples.shape) == 1:
         samples = samples.reshape(-1, 1)
     ch = samples.shape[1]
     delta_fs = 60 if fs == 44100 else 0
     block_samples = 3 * (fs + delta_fs)
-    seg_cnt = int(np.floor(samples.shape[0] / block_samples) + 1)
-    if seg_cnt < 2:
-        return 0, "0.00 dB", "-100.00 dB"
+    seg_cnt = int(np.ceil(samples.shape[0] / block_samples))
 
     rms = np.zeros((seg_cnt, ch))
     peaks = np.zeros((seg_cnt, ch))
     curr_sam = 0
-    for i in range(seg_cnt - 1):
+    for i in range(seg_cnt):
         block = samples[curr_sam : curr_sam + block_samples, :]
-        rms[i, :] = np.sqrt(2.0 * np.sum(block**2, axis=0) / float(block_samples))
+        rms[i, :] = np.sqrt(2.0 * np.sum(block**2, axis=0) / float(len(block)))
         peaks[i, :] = np.max(np.abs(block), axis=0)
         curr_sam += block_samples
-
-    if curr_sam < samples.shape[0]:
-        rem = samples[curr_sam:, :]
-        rms[seg_cnt - 1, :] = np.sqrt(2.0 * np.sum(rem**2, axis=0) / max(1, rem.shape[0]))
-        peaks[seg_cnt - 1, :] = np.max(np.abs(rem), axis=0)
 
     peaks = np.sort(peaks, axis=0)
     rms = np.sort(rms, axis=0)
@@ -54,8 +54,10 @@ def compute_dr14_samples(samples: np.ndarray, fs: int) -> tuple[int, str, str]:
     r = np.arange(seg_cnt - n_blk, seg_cnt)
     rms_sum = np.sum(rms[r, :] ** 2, axis=0)
 
-    sec_peaks = np.maximum(peaks[seg_cnt - 2, :], 1e-12)
-    ch_dr14 = -20.0 * np.log10(np.sqrt(rms_sum / n_blk) / sec_peaks)
+    sec_peaks = np.maximum(peaks[max(0, seg_cnt - 2), :], 1e-12)
+    active = rms_sum > 1e-24
+    ch_dr14 = np.zeros(ch)
+    ch_dr14[active] = -20.0 * np.log10(np.sqrt(rms_sum[active] / n_blk) / sec_peaks[active])
     dr14 = max(0, round(float(np.mean(ch_dr14))))
 
     max_peak = float(np.max(peaks))
@@ -65,7 +67,7 @@ def compute_dr14_samples(samples: np.ndarray, fs: int) -> tuple[int, str, str]:
     else:
         peak_str = f"{peak_db:.2f} dB"
 
-    y_rms = float(np.sum(np.mean(rms, axis=0)) / 2.0)
+    y_rms = float(np.mean(np.sqrt(2.0 * np.mean(samples**2, axis=0))))
     rms_db = 20.0 * np.log10(max(y_rms, 1e-12))
     if abs(rms_db) < 0.005:
         rms_str = "0.00 dB"
@@ -87,13 +89,15 @@ def measure_audio_file(file_path: Path) -> dict[str, object]:
             channels = audio.info.channels
             fs = audio.info.sample_rate
             total_secs = audio.info.length
-        except Exception:
-            bps, channels, fs, total_secs = 16, 2, 44100, 0.0
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"cannot read FLAC stream geometry: {p.name}") from exc
 
         cmd = ["flac", "-d", "-c", "-s", "--force-raw-format", "--endian=little", "--sign=signed", str(p)]
-        proc = subprocess.run(cmd, capture_output=True, check=True)
+        proc = subprocess.run(cmd, capture_output=True, check=True, timeout=300)
         raw = proc.stdout
-        if bps == 16:
+        if bps == 8:
+            s = np.frombuffer(raw, dtype=np.int8).astype(np.float64) / 128.0
+        elif bps == 16:
             s = np.frombuffer(raw, dtype=np.int16).astype(np.float64) / 32768.0
         elif bps == 24:
             a = np.frombuffer(raw, dtype=np.uint8)
@@ -102,8 +106,10 @@ def measure_audio_file(file_path: Path) -> dict[str, object]:
             a2 = a[2::3].astype(np.int32) << 16
             sign_extend = np.where(a2 & 0x800000, 0xFF000000, 0)
             s = ((a0 | a1 | a2 | sign_extend).astype(np.int32)).astype(np.float64) / 8388608.0
+        elif bps == 32:
+            s = np.frombuffer(raw, dtype="<i4").astype(np.float64) / 2147483648.0
         else:
-            s = np.frombuffer(raw, dtype=np.int32).astype(np.float64) / 2147483648.0
+            raise ValueError(f"unsupported FLAC PCM depth: {bps}")
 
         if channels > 1:
             s = s.reshape(-1, channels)
@@ -177,7 +183,7 @@ def measure_audio_files(files: list[Path]) -> tuple[list[dict[str, object]], int
         if not isinstance(raw_dr, (str, int, float)):
             raise TypeError("measured DR value is not numeric")
         dr_values.append(int(raw_dr))
-    album_dr = round(sum(dr_values) / len(dr_values))
+    album_dr = round(sum(dr_values) / len(dr_values)) if len(tracks) == len(files) else None
     return tracks, album_dr
 
 
@@ -234,7 +240,7 @@ def clean_track_name(raw_name: str) -> str:
 
 
 def norm(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", s.lower())
+    return re.sub(r"[^\w]+", "", unicodedata.normalize("NFC", s).casefold(), flags=re.UNICODE)
 
 
 def extract_track_number(s: str) -> int | None:
@@ -426,8 +432,14 @@ def generate_dr14_report(
 def save_dr14_report(folder: Path, report_content: str) -> Path:
     """Save standardized dr14.txt in target folder if not already existing."""
     target = folder / "dr14.txt"
-    if not target.is_file() or target.stat().st_size == 0:
-        target.write_text(report_content, encoding="utf-8")
+    if target.is_symlink():
+        raise ValueError(f"refusing symlinked DR report: {target}")
+    try:
+        with target.open("x", encoding="utf-8") as handle:
+            handle.write(report_content)
+    except FileExistsError:
+        # Existing reports, including empty user files, are preservation inputs.
+        pass
     return target
 
 
@@ -623,7 +635,7 @@ def main() -> int:
         for row in tracks:
             print(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
         print(json.dumps({"type": "album", "dr": album_dr}, ensure_ascii=False, separators=(",", ":")))
-        return 0
+        return 0 if extra_files and len(tracks) == len(extra_files) else 1
 
     if len(args) < 1:
         found = find_report_in_dir(Path.cwd())
@@ -637,7 +649,7 @@ def main() -> int:
                 for row in tracks:
                     print(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
                 print(json.dumps({"type": "album", "dr": album_dr}, ensure_ascii=False, separators=(",", ":")))
-                return 0
+                return 0 if len(tracks) == len(audio_files) else 1
             print("usage: dr14_parse.py [--measure] [dr14.txt|-|DIR] [AUDIO_FILES...]", file=sys.stderr)
             return 2
         source_path = found
@@ -659,7 +671,7 @@ def main() -> int:
                         for row in tracks:
                             print(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
                         print(json.dumps({"type": "album", "dr": album_dr}, ensure_ascii=False, separators=(",", ":")))
-                        return 0
+                        return 0 if len(tracks) == len(audio_files) else 1
                     print(f"ERROR: no DR report or audio files found in directory: {p}", file=sys.stderr)
                     return 1
                 source_path = found
@@ -678,7 +690,7 @@ def main() -> int:
                     for row in tracks:
                         print(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
                     print(json.dumps({"type": "album", "dr": album_dr}, ensure_ascii=False, separators=(",", ":")))
-                    return 0
+                    return 0 if len(tracks) == len(cand_audios) else 1
                 print(f"ERROR: report does not exist: {p}", file=sys.stderr)
                 return 1
             else:

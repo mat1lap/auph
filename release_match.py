@@ -3,10 +3,31 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
+
+
+def release_disc_counts(media: Iterable[dict[str, Any]]) -> dict[int, int]:
+    """Retain full fetched track-list evidence when declared counts are absent.
+
+    Missing/duplicate medium positions cannot safely identify a disc. Returning
+    no counts forces the caller to retain uncertainty rather than invent order.
+    """
+    counts: dict[int, int] = {}
+    for medium in media:
+        try:
+            position = int(medium.get("position") or 0)
+            declared = medium.get("track-count")
+            count = int(declared) if declared is not None else len(medium.get("tracks") or [])
+        except (TypeError, ValueError, OverflowError):
+            return {}
+        if position < 1 or count < 1 or position in counts:
+            return {}
+        counts[position] = count
+    return counts
 
 
 def assess_medium_layouts(
@@ -20,7 +41,7 @@ def assess_medium_layouts(
     is the minimum release-level evidence for multi-disc safety.
     """
     media = list(media)
-    candidate = {int(item.get("position") or 0): int(item.get("track-count") or 0) for item in media}
+    candidate = release_disc_counts(media)
     present = sorted(local_disc_counts)
     conflicts: list[str] = []
     for disc, count in sorted(local_disc_counts.items()):
@@ -31,15 +52,26 @@ def assess_medium_layouts(
             conflicts.append(f"disc {disc} track count {count}!={expected}")
     if local_disc_durations:
         for medium in media:
-            position = int(medium.get("position") or 0)
+            try:
+                position = int(medium.get("position") or 0)
+            except (TypeError, ValueError):
+                conflicts.append("invalid medium position")
+                continue
             local = local_disc_durations.get(position)
             tracks = medium.get("tracks") or []
             if not local or len(local) != len(tracks):
                 continue
-            remote = [
-                float(track.get("length") or (track.get("recording") or {}).get("length") or 0) / 1000
-                for track in tracks
-            ]
+            try:
+                remote = [
+                    float(track.get("length") or (track.get("recording") or {}).get("length") or 0) / 1000
+                    for track in tracks
+                ]
+            except (TypeError, ValueError, OverflowError):
+                conflicts.append(f"disc {position} invalid duration")
+                continue
+            if any(not math.isfinite(value) or value < 0 for value in remote):
+                conflicts.append(f"disc {position} non-finite or negative duration")
+                continue
             if all(remote) and any(abs(left - right) > max(8.0, left * 0.06) for left, right in zip(local, remote)):
                 conflicts.append(f"disc {position} duration layout conflict")
     complete = bool(candidate) and set(present) == set(candidate) and not conflicts
@@ -91,13 +123,21 @@ def select_release_candidate(
     config = load_config().matching
     minimum_score = config.release_min_score if minimum_score is None else minimum_score
     minimum_margin = config.release_min_margin if minimum_margin is None else minimum_margin
-    eligible = [
-        item
-        for item in candidates
-        if not (item.get("identity") or {}).get("rejected", True)
-        and str((item.get("identity") or {}).get("confidence", "NONE")) in ACCEPTABLE
-        and float((item.get("identity") or {}).get("score", 0)) >= minimum_score
-    ]
+    eligible = []
+    for item in candidates:
+        identity = item.get("identity") or {}
+        try:
+            score = float(identity.get("score", 0))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if (
+            item.get("id")
+            and not identity.get("rejected", True)
+            and str(identity.get("confidence", "NONE")) in ACCEPTABLE
+            and math.isfinite(score)
+            and score >= minimum_score
+        ):
+            eligible.append(item)
     eligible.sort(
         key=lambda item: (
             -float((item.get("identity") or {}).get("score", 0)),

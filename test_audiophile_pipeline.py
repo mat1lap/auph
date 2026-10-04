@@ -3960,6 +3960,7 @@ class TestStrictGlobalAudiophileStandardsAudit:
         import discogs_release_find
 
         monkeypatch.setenv("ACOUSTID_API_KEY", "dummy_key")
+        monkeypatch.setenv("SCRIPT_DIR", str(tmp_path))
         album_dir = tmp_path / "Queen - Unknown Album"
         album_dir.mkdir()
         track_flac = album_dir / "01. Unknown Track.flac"
@@ -3985,6 +3986,7 @@ class TestStrictGlobalAudiophileStandardsAudit:
             "results": [
                 {
                     "id": "acoust-123",
+                    "score": 0.99,
                     "recordings": [
                         {
                             "id": "rec-123",
@@ -3994,7 +3996,11 @@ class TestStrictGlobalAudiophileStandardsAudit:
                 }
             ],
         }
+        # The shared transport consumes a bounded HTTP body before parsing.
+        mock_acoust_resp.headers = {}
+        mock_acoust_resp.iter_content.return_value = [json.dumps(mock_acoust_resp.json.return_value).encode()]
         monkeypatch.setattr(finder.session, "get", lambda *a, **kw: mock_acoust_resp)
+        monkeypatch.setattr(finder, "discogs_api_get", lambda _url: None)
 
         # Mock MusicBrainz release lookup with Discogs relation
         def mock_mb_api_get(url: str):

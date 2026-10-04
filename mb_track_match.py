@@ -12,12 +12,16 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import math
 import re
+import unicodedata
 from pathlib import Path
+
+from lyrics_quality import version_signature
 
 
 def norm(s: str) -> str:
-    s = str(s or "").lower()
+    s = unicodedata.normalize("NFC", str(s or "")).casefold()
     s = re.sub(r"\b(feat\.?|featuring|ft\.?)\b", " ", s)
     s = re.sub(r"[^\w]+", "", s, flags=re.UNICODE)
     return s
@@ -41,28 +45,15 @@ def intro_like(title: str) -> bool:
     return any(k in n for k in ("intro", "introduction", "prelude", "overture", "prologue", "opening"))
 
 
-VERSION_MARKERS = frozenset(
-    {
-        "live",
-        "remix",
-        "mix",
-        "edit",
-        "demo",
-        "instrumental",
-        "karaoke",
-        "acoustic",
-        "mono",
-        "stereo",
-        "radio",
-        "extended",
-        "reprise",
-    }
-)
-
-
 def version_markers(title: str) -> set[str]:
-    words = set(re.findall(r"[\w]+", str(title or "").casefold(), flags=re.UNICODE))
-    return words.intersection(VERSION_MARKERS)
+    markers = set(version_signature(str(title or "")))
+    # Preserve legacy mix/edit/reprise qualifiers only inside explicit version
+    # segments. Ordinary title words are never version evidence.
+    segments = re.findall(r"[([{]([^)]*?)[)\]}]", str(title or ""))
+    segments.extend(re.split(r"\s+[-–—/]\s+", str(title or ""))[1:])
+    for segment in segments:
+        markers.update(set(re.findall(r"[\w]+", segment.casefold())).intersection({"mix", "edit", "reprise"}))
+    return markers
 
 
 def artist_credit(ac: list[dict] | None) -> str:
@@ -82,6 +73,8 @@ def choose_medium(mb: dict, disc: int, local_title: str, local_number: int | Non
     if not media:
         return None, "no-media"
     by_position = [m for m in media if str(m.get("position", "")) == str(disc)]
+    if len(by_position) > 1:
+        return None, "ambiguous-disc-position"
     if by_position:
         return by_position[0], "disc-position"
     unpositioned = [m for m in media if not str(m.get("position") or "").isdigit() or int(m["position"]) < 1]
@@ -150,16 +143,20 @@ def resolve_mb_track(
 
     candidates: list[tuple[float, dict, list[str]]] = []
 
-    for idx, t in enumerate(tracks):
+    for t in tracks:
         title = str(t.get("title") or (t.get("recording") or {}).get("title") or "")
         number = str(t.get("number") or "")
         length_ms = t.get("length")
+        if length_ms is None:
+            length_ms = (t.get("recording") or {}).get("length")
         try:
             mb_dur = float(length_ms) / 1000.0 if length_ms is not None else None
-        except (ValueError, TypeError):
-            mb_dur = None
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if mb_dur is not None and (not math.isfinite(mb_dur) or mb_dur <= 0):
+            continue
         duration_delta = abs(duration - mb_dur) if mb_dur is not None and duration > 0 else None
-        candidate_artist = artist_credit((t.get("recording") or {}).get("artist-credit") or t.get("artist-credit"))
+        candidate_artist = artist_credit(t.get("artist-credit") or (t.get("recording") or {}).get("artist-credit"))
         artist_sim = sim(current_artist, candidate_artist) if current_artist and candidate_artist else None
 
         filename_sim = sim(filename_title, title) if filename_title else 0.0
@@ -254,7 +251,7 @@ def resolve_mb_track(
                     reasons.append("dur-mismatch")
 
         expected_pos = max(1, tracknumber - offset)
-        mb_pos = idx + 1
+        mb_pos = t.get("position")
         raw_num = None
         m_num = re.search(r"\d+", number)
         if m_num:
@@ -276,6 +273,8 @@ def resolve_mb_track(
 
     title = str(best.get("title") or (best.get("recording") or {}).get("title") or "")
     length_ms = best.get("length")
+    if length_ms is None:
+        length_ms = (best.get("recording") or {}).get("length")
     try:
         mb_dur = float(length_ms) / 1000.0 if length_ms is not None else None
     except (ValueError, TypeError):
@@ -294,7 +293,7 @@ def resolve_mb_track(
     if version_markers(filename_title or cue_title or current_title) != version_markers(title):
         if version_markers(filename_title or cue_title or current_title) or version_markers(title):
             hard_conflicts.append("version-marker-conflict")
-    candidate_artist = artist_credit((best.get("recording") or {}).get("artist-credit") or best.get("artist-credit"))
+    candidate_artist = artist_credit(best.get("artist-credit") or (best.get("recording") or {}).get("artist-credit"))
     selected_artist_sim = sim(current_artist, candidate_artist) if current_artist and candidate_artist else None
     if selected_artist_sim is not None and selected_artist_sim < 0.45:
         hard_conflicts.append("artist-conflict")
@@ -323,18 +322,20 @@ def resolve_mb_track(
             >= filename_sim - 0.01
         ]
         ok = len(tied_primary) == 1
+    if margin < 50:
+        hard_conflicts.append("ambiguous-release-track")
     if hard_conflicts:
         ok = False
 
     recording = best.get("recording") or {}
-    recording_ac = recording.get("artist-credit") or best.get("artist-credit") or []
+    recording_ac = best.get("artist-credit") or recording.get("artist-credit") or []
     artist_ids = []
     artist_names = []
     artist_sorts = []
     for credit in recording_ac:
         artist = credit.get("artist") or {}
         aid = artist.get("id")
-        name = artist.get("name") or credit.get("name") or ""
+        name = credit.get("name") or artist.get("name") or ""
         sort_name = artist.get("sort-name") or ""
         if aid and aid not in artist_ids:
             artist_ids.append(aid)
@@ -359,7 +360,7 @@ def resolve_mb_track(
         "track_number": str(best.get("number") or ""),
         "track_position": str(best.get("position") or ""),
         "title": title,
-        "artist_credit": artist_credit(recording.get("artist-credit") or best.get("artist-credit")),
+        "artist_credit": artist_credit(best.get("artist-credit") or recording.get("artist-credit")),
         "artist_ids": artist_ids,
         "artist_names": artist_names,
         "artist_sorts": artist_sorts,

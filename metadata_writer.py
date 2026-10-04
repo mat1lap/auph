@@ -36,6 +36,7 @@ from metadata_schema import (
     STABLE_ID_FIELDS,
     canonical_field_name,
     normalize_value,
+    valid_date,
 )
 from pipeline_config import load_config
 
@@ -352,9 +353,11 @@ def _write_tags_in_place(
     for field, value in tags:
         f_up = canonical_field_name(field)
 
-        cleaned_val = clean_manifest_value(str(value), field)
+        cleaned_val = clean_manifest_value(value, field)
         if not cleaned_val:
             continue
+        if f_up in {"DATE", "ORIGINALDATE", "RECORDINGDATE", "RELEASEDATE"} and not valid_date(cleaned_val):
+            raise ValueError(f"invalid incoming {f_up}: {cleaned_val!r}")
         if f_up == "RELEASETYPE":
             cleaned_val = cleaned_val.lower()
 
@@ -737,24 +740,67 @@ def _picture_inventory(audio: FLAC) -> list[dict[str, object]]:
     ]
 
 
-def _append_provenance_record(ledger: Path, record: Mapping[str, Any]) -> None:
-    """Publish a complete ledger, retaining the old one on any write failure."""
+def publish_provenance_bytes(ledger: Path, rows: bytes) -> None:
+    """Publish a ledger and restore its previous state on catchable failure.
+
+    A process kill still requires manual recovery; this is a single-file
+    replacement, not an atomic album commit.
+    """
     with _PROVENANCE_LOCK:
         if ledger.is_symlink():
             raise ValueError(f"refusing symlinked provenance ledger: {ledger}")
-        old = ledger.read_bytes() if ledger.exists() else b""
-        row = (json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
-        descriptor, temporary = tempfile.mkstemp(prefix=f".{ledger.name}.", suffix=".pending", dir=ledger.parent)
+        existed = ledger.exists()
+        old = ledger.read_bytes() if existed else b""
+        backup: Path | None = None
+        if existed:
+            fd, backup_name = tempfile.mkstemp(prefix=f".{ledger.name}.", suffix=".rollback", dir=ledger.parent)
+            backup = Path(backup_name)
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(old)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except BaseException:
+                backup.unlink(missing_ok=True)
+                raise
+        try:
+            descriptor, temporary = tempfile.mkstemp(prefix=f".{ledger.name}.", suffix=".pending", dir=ledger.parent)
+        except BaseException:
+            if backup is not None:
+                backup.unlink(missing_ok=True)
+            raise
+        retain_backup = False
         try:
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(old)
-                handle.write(row)
+                handle.write(rows)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, ledger)
+        except BaseException as exc:
+            if not os.path.exists(temporary):
+                try:
+                    if backup is not None:
+                        os.replace(backup, ledger)
+                    else:
+                        ledger.unlink(missing_ok=True)
+                except OSError as rollback_exc:
+                    retain_backup = True
+                    raise RuntimeError(
+                        f"ledger publication failed ({exc}); recovery failed ({rollback_exc}); "
+                        f"recovery copy retained at {backup}"
+                    ) from exc
+            raise
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
+            if backup is not None and not retain_backup:
+                backup.unlink(missing_ok=True)
+
+
+def _append_provenance_record(ledger: Path, record: Mapping[str, Any]) -> None:
+    row = (json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+    publish_provenance_bytes(ledger, row)
 
 
 def write_tags(
@@ -835,7 +881,9 @@ def write_tags(
             lyric_archives=lyric_archives,
         )
         canonical_verify(tmp_path, require_core=False)
-        stream_check = subprocess.run(["flac", "-t", "-s", str(tmp_path)], capture_output=True, text=True, check=False)
+        stream_check = subprocess.run(
+            ["flac", "-t", "-s", str(tmp_path)], capture_output=True, text=True, check=False, timeout=300
+        )
         if stream_check.returncode:
             raise RuntimeError(f"temporary FLAC failed decode validation: {stream_check.stderr.strip()}")
         if _stream_signature(tmp_path) != before_stream:
@@ -872,8 +920,8 @@ def write_tags(
         os.close(backup_fd)
         backup_path = Path(backup_name)
         shutil.copy2(flac_path, backup_path)
-        os.replace(tmp_path, flac_path)
         replaced = True
+        os.replace(tmp_path, flac_path)
         for archive, payload in lyric_archives.items():
             if not archive.exists():
                 with archive.open("x", encoding="utf-8", newline="") as handle:
@@ -924,7 +972,9 @@ def write_tags(
         }
         if load_config().preservation.provenance_ledger:
             _append_provenance_record(ledger, record)
-        return WriteReport(transaction_id, decisions, str(ledger))
+        return WriteReport(
+            transaction_id, decisions, str(ledger) if load_config().preservation.provenance_ledger else ""
+        )
     except BaseException as exc:
         if replaced and backup_path is not None and backup_path.exists():
             try:
@@ -962,10 +1012,14 @@ def main() -> int:
     flac_files: list[str] = []
     tags_file: str | None = None
     for pos in args.positionals:
-        if pos.endswith(".flac"):
+        if Path(pos).suffix.casefold() == ".flac":
             flac_files.append(pos)
         else:
+            if tags_file is not None:
+                return die("only one tags manifest is allowed")
             tags_file = pos
+    if not flac_files:
+        return die("at least one FLAC input is required")
 
     has_write_flags = any(
         [
@@ -1026,7 +1080,7 @@ def main() -> int:
         )
 
         if not args.dry_run:
-            canonical_verify(flac)
+            canonical_verify(flac, require_core=False)
     except (OSError, RuntimeError, ValueError) as exc:
         return die(str(exc))
     return 0

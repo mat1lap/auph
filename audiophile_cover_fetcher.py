@@ -56,7 +56,7 @@ import requests
 from mutagen import MutagenError
 from PIL import Image, ImageCms, ImageDraw, ImageFilter, ImageOps, ImageStat, UnidentifiedImageError
 
-from provider_cache import retry_delay
+from provider_cache import redact_secrets, retry_delay
 
 USER_AGENT = "AudiophileArchTagger/6.0 (audiophile@music-archive.org)"
 TIMEOUT = 12
@@ -2334,9 +2334,9 @@ class CoverFetcher:
                 if is_verbose:
                     print(f"[VERBOSE][COVER] {p_name:<24} -> {len(cands)} candidate(s) found")
             except Exception as e:
-                self.last_fetch_errors[p_name] = f"provider_error: {e}"
+                self.last_fetch_errors[p_name] = f"provider_error: {redact_secrets(str(e))}"
                 if is_verbose:
-                    print(f"[VERBOSE][COVER] {p_name:<24} -> ERROR: {e}")
+                    print(f"[VERBOSE][COVER] {p_name:<24} -> ERROR: {redact_secrets(str(e))}")
 
         if not raw_candidates:
             if is_verbose:
@@ -2461,7 +2461,7 @@ class CoverFetcher:
                         evaluated.append(future.result())
                     except Exception as e:
                         c = future_to_cand[future]
-                        c.error = str(e)
+                        c.error = redact_secrets(str(e))
                         evaluated.append(c)
             if not (self.manual_all or self.exhaustive_categories) and any(
                 c.role_tier >= RoleTier.LIKELY_FRONT
@@ -2515,7 +2515,7 @@ class CoverFetcher:
                         print(
                             f"[VERBOSE][COVER]   id={c.stable_id} release_evidence={c.release_evidence} "
                             f"role_evidence={c.role_evidence} representation={c.representation_kind.value} "
-                            f"evaluated_url={c.evaluated_url} bytes={c.file_size} "
+                            f"evaluated_url={redact_secrets(c.evaluated_url)} bytes={c.file_size} "
                             f"effective={c.effective_width}x{c.effective_height} "
                             f"crop={c.crop_box} crop_confidence={c.crop_confidence:.2f} "
                             f"watermark={c.watermark_confidence:.2f} quality_components={c.score_breakdown}"

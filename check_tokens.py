@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from provider_cache import redact_secrets
+
 # ANSI Colors
 CYAN = "\033[96m"
 GREEN = "\033[92m"
@@ -82,7 +84,8 @@ def load_env_file(env_path: Path | None = None) -> dict[str, str]:
                 break
             except Exception:
                 pass
-    return env_dict
+    # Match the pipeline: exported values take precedence over .env defaults.
+    return {**env_dict, **os.environ}
 
 
 def update_env_var(key: str, value: str, env_path: Path | None = None) -> bool:
@@ -134,7 +137,7 @@ def check_discogs(token: str) -> TokenCheckResult:
     )
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            data = json.loads(resp.read(1_000_001).decode("utf-8"))
             user = data.get("username", "Unknown")
             return TokenCheckResult(
                 service="Discogs API",
@@ -156,7 +159,7 @@ def check_discogs(token: str) -> TokenCheckResult:
             service="Discogs API",
             var_name="DISCOGS_TOKEN",
             status="WARN",
-            message=f"Сетевой сбой при проверке: {e}",
+            message=f"Сетевой сбой при проверке: {redact_secrets(str(e))}",
         )
 
 
@@ -172,16 +175,22 @@ def check_acoustid(key: str) -> TokenCheckResult:
     url = f"https://api.acoustid.org/v2/lookup?client={key}&duration=100&fingerprint=AQAAAA"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "AudiophileArchTagger/6.0"})
-        with urllib.request.urlopen(req, timeout=8):
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read(1_000_001).decode("utf-8"))
+            if data.get("status") == "ok":
+                return TokenCheckResult("AcoustID (Chromaprint)", "ACOUSTID_API_KEY", "OK", "API key accepted")
+            error = data.get("error") or {}
+            if error.get("code") == 4:
+                return TokenCheckResult("AcoustID (Chromaprint)", "ACOUSTID_API_KEY", "FAIL", "Invalid API key")
             return TokenCheckResult(
-                service="AcoustID (Chromaprint)",
-                var_name="ACOUSTID_API_KEY",
-                status="OK",
-                message="Активен (ключ распознан сервисом)",
+                "AcoustID (Chromaprint)",
+                "ACOUSTID_API_KEY",
+                "WARN",
+                "Lookup rejected; this diagnostic fingerprint does not establish key validity",
             )
     except urllib.error.HTTPError as e:
-        body = e.read().decode(errors="replace")
-        if "invalid API key" in body.lower():
+        body = e.read(1_000_001).decode(errors="replace")
+        if "invalid api key" in body.lower():
             return TokenCheckResult(
                 service="AcoustID (Chromaprint)",
                 var_name="ACOUSTID_API_KEY",
@@ -192,15 +201,15 @@ def check_acoustid(key: str) -> TokenCheckResult:
         return TokenCheckResult(
             service="AcoustID (Chromaprint)",
             var_name="ACOUSTID_API_KEY",
-            status="OK",
-            message="Активен (ключ принят сервером)",
+            status="WARN",
+            message=f"HTTP {e.code}: key validity could not be established",
         )
     except Exception as e:
         return TokenCheckResult(
             service="AcoustID (Chromaprint)",
             var_name="ACOUSTID_API_KEY",
             status="WARN",
-            message=f"Ошибка сети: {e}",
+            message=f"Ошибка сети: {redact_secrets(str(e))}",
         )
 
 
@@ -242,7 +251,7 @@ def check_fanart(key: str) -> TokenCheckResult:
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            data = json.loads(resp.read(1_000_001).decode("utf-8"))
             albums = len(data.get("albums", {}))
             return TokenCheckResult(
                 service="Fanart.tv API",
@@ -270,7 +279,7 @@ def check_fanart(key: str) -> TokenCheckResult:
             service="Fanart.tv API",
             var_name="FANART_API_KEY",
             status="WARN",
-            message=f"Ошибка сети: {e}",
+            message=f"Ошибка сети: {redact_secrets(str(e))}",
         )
 
 
@@ -316,7 +325,7 @@ def check_yandex(token: str, proxy: str = "") -> TokenCheckResult:
     )
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            data = json.loads(resp.read(1_000_001).decode("utf-8"))
             acc = data.get("result", {}).get("account", {})
             has_plus = data.get("result", {}).get("plus", {}).get("hasPlus", False)
             login = acc.get("login", "Unknown")
@@ -356,7 +365,7 @@ def check_yandex(token: str, proxy: str = "") -> TokenCheckResult:
             service="Яндекс Музыка",
             var_name="YANDEX_MUSIC_TOKEN",
             status="WARN",
-            message=f"Ошибка сети: {e}",
+            message=f"Ошибка сети: {redact_secrets(str(e))}",
         )
 
 
@@ -391,7 +400,7 @@ def check_usdb(cookie: str) -> TokenCheckResult:
     req = urllib.request.Request(url, headers={"Cookie": clean_cookie, "User-Agent": "Mozilla/5.0"})
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
-            html = resp.read().decode(errors="replace")
+            html = resp.read(1_000_001).decode(errors="replace")
             if "Logout" in html or "profile" in html or "Log out" in html:
                 return TokenCheckResult(
                     service="UltraStar DB",
@@ -411,7 +420,7 @@ def check_usdb(cookie: str) -> TokenCheckResult:
             service="UltraStar DB",
             var_name="USDB_COOKIE",
             status="WARN",
-            message=f"Ошибка сети: {e}",
+            message=f"Ошибка сети: {redact_secrets(str(e))}",
         )
 
 
@@ -424,7 +433,7 @@ def check_vk(token: str, cookie: str) -> list[TokenCheckResult]:
         req = urllib.request.Request(url, headers={"User-Agent": "VKAndroidApp/1.0"})
         try:
             with urllib.request.urlopen(req, timeout=8) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+                data = json.loads(resp.read(1_000_001).decode("utf-8"))
                 if "response" in data:
                     user_info = data["response"][0] if data["response"] else {}
                     uid = user_info.get("id")
@@ -467,7 +476,7 @@ def check_vk(token: str, cookie: str) -> list[TokenCheckResult]:
                     service="ВКонтакте API",
                     var_name="VK_TOKEN",
                     status="WARN",
-                    message=f"Ошибка сети: {e}",
+                    message=f"Ошибка сети: {redact_secrets(str(e))}",
                 )
             )
     else:
@@ -530,7 +539,7 @@ def check_vk(token: str, cookie: str) -> list[TokenCheckResult]:
                     service="ВКонтакте Web (remixsid)",
                     var_name="VK_COOKIE",
                     status="WARN",
-                    message=f"Ошибка проверки: {e}",
+                    message=f"Ошибка проверки: {redact_secrets(str(e))}",
                 )
             )
     else:
@@ -554,7 +563,7 @@ def check_tidal_builtin() -> TokenCheckResult:
     )
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            data = json.loads(resp.read(1_000_001).decode("utf-8"))
             cnt = len(data.get("items", []))
             return TokenCheckResult(
                 service="Tidal High-Res CDN",
@@ -567,7 +576,7 @@ def check_tidal_builtin() -> TokenCheckResult:
             service="Tidal High-Res CDN",
             var_name="TIDAL (Builtin)",
             status="WARN",
-            message=f"Ошибка: {e}",
+            message=f"Ошибка: {redact_secrets(str(e))}",
         )
 
 

@@ -8,9 +8,11 @@ chosen by this project and, importantly, their cardinality and identity scope.
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from dataclasses import dataclass
+from datetime import date
 from enum import Enum
 
 
@@ -259,6 +261,18 @@ UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{
 ISRC_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{3}\d{7}$")
 
 
+def valid_date(value: str) -> bool:
+    """Validate calendar components while preserving year/month precision."""
+    if not DATE_RE.fullmatch(value):
+        return False
+    parts = [int(part) for part in value.split("-")]
+    try:
+        date(parts[0], parts[1] if len(parts) > 1 else 1, parts[2] if len(parts) > 2 else 1)
+    except ValueError:
+        return False
+    return True
+
+
 def canonical_field_name(name: str) -> str:
     field = unicodedata.normalize("NFC", str(name)).strip().upper()
     if field.startswith("PERFORMER:"):
@@ -280,6 +294,12 @@ def field_scope(name: str) -> Scope | None:
 def normalize_value(field: str, value: object) -> str:
     """Lossless-enough canonicalisation for storage, never typography rewriting."""
     name = canonical_field_name(field)
+    if value is None:
+        return ""
+    if not isinstance(value, (str, int, float, bool)):
+        raise TypeError(f"unsupported value type for {name}: {type(value).__name__}")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"non-finite numeric value for {name}")
     text = str(value)
     text = text.removeprefix("\ufeff")
     text = text.replace("\x00", "")

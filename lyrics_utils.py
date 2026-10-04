@@ -8909,7 +8909,7 @@ def fetch_lyrics_cascade(
                 status, error = classify_lyrics_exception(e)
                 acquisition_results.append({"source": p_name, "acquisition_status": status, "error": error})
                 if is_verbose:
-                    print(f"[VERBOSE][LYRICS] [L1 Word-Sync] {p_name:<32} -> ERROR: {e}")
+                    print(f"[VERBOSE][LYRICS] [L1 Word-Sync] {p_name:<32} -> ERROR: {redact_secrets(str(e))}")
                 l1_results[p_name] = None
 
     for name, _ in l1_chain:
@@ -9130,7 +9130,7 @@ def fetch_lyrics_cascade(
             status, error = classify_lyrics_exception(e)
             acquisition_results.append({"source": name, "acquisition_status": status, "error": error})
             if is_verbose:
-                print(f"[VERBOSE][LYRICS] [L2 Line-Sync] {name:<32} -> ERROR: {e}")
+                print(f"[VERBOSE][LYRICS] [L2 Line-Sync] {name:<32} -> ERROR: {redact_secrets(str(e))}")
             res = None
 
         if not res or not res.get("syncedLyrics"):
@@ -9302,7 +9302,7 @@ def fetch_lyrics_cascade(
                 }
             )
             if is_verbose:
-                print(f"[VERBOSE][LYRICS] [L3 Plain] {plain_provider_name:<32} -> ERROR: {e}")
+                print(f"[VERBOSE][LYRICS] [L3 Plain] {plain_provider_name:<32} -> ERROR: {redact_secrets(str(e))}")
             provider_result = None
 
         if isinstance(provider_result, dict):

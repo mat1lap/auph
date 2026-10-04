@@ -37,7 +37,7 @@ PARSER_VERSION = "2026-10-04-lyrics-v9"
 
 def redact_secrets(message: str) -> str:
     """Strip common credential fields from URL/header exception diagnostics."""
-    message = re.sub(r"(?i)(\bBearer\s+)\S+", r"\1[REDACTED]", message)
+    message = re.sub(r"(?i)(\b(?:Bearer|OAuth|Basic)\s+)\S+", r"\1[REDACTED]", message)
     return re.sub(
         r"(?i)(\b(?:access_token|api[_-]?key|apikey|token|client|password|secret|authorization|cookie)\s*[=:]\s*)[^\s&,'\"<>]+",
         r"\1[REDACTED]",
@@ -57,7 +57,7 @@ class ProviderResult:
 
     @property
     def ok(self) -> bool:
-        return 200 <= self.status < 300 and isinstance(self.payload, (dict, list))
+        return not self.error and 200 <= self.status < 300 and isinstance(self.payload, (dict, list))
 
     @property
     def classification(self) -> str:
@@ -75,7 +75,7 @@ class ProviderResult:
         if self.status in {408, 425, 500, 502, 503, 504} or self.status == 0:
             return "TRANSIENT_ERROR"
         if self.status == 200 and self.error:
-            return "PARSER_ERROR"
+            return "INVALID_RESPONSE" if self.error == "provider error response" else "PARSER_ERROR"
         if self.ok:
             return "FOUND"
         return "INVALID_RESPONSE"
@@ -99,9 +99,10 @@ class JsonCache:
 
     def load(self, key: str) -> tuple[int, Any] | None:
         path = self.path_for(key)
-        if not path.is_file() or path.stat().st_size == 0:
-            return None
         try:
+            stat = path.stat()
+            if stat.st_size == 0 or stat.st_size > 10_100_000:
+                return None
             obj = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, UnicodeError):
             return None
@@ -125,7 +126,7 @@ class JsonCache:
             if status not in {200, 204, 404}:
                 return None
             ttl = self.negative_ttl_seconds if status in {204, 404} else self.ttl_seconds
-            if time.time() - path.stat().st_mtime > ttl:
+            if time.time() - stat.st_mtime > ttl:
                 return None
             return status, obj["payload"]
         # Raw legacy payloads have no parser version. Their apparent freshness
@@ -187,6 +188,20 @@ def retry_delay(response: object | None, attempt: int, *, base: float = 1.0, max
     return min(maximum, base * (2 ** max(0, attempt - 1)))
 
 
+def request_cache_key(url: str, headers: dict[str, str]) -> str:
+    """Separate explicit credential/language contexts without retaining secrets."""
+    context = {
+        name.casefold(): value
+        for name, value in headers.items()
+        if name.casefold() in {"authorization", "cookie", "accept-language"}
+        or name.casefold().endswith(("-token", "-key", "-api-version"))
+    }
+    if not context:
+        return url
+    digest = hashlib.sha256(json.dumps(context, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return f"{url}\nrequest-context:{digest}"
+
+
 def fetch_json(
     session: JsonSession,
     url: str,
@@ -199,7 +214,15 @@ def fetch_json(
     sleeper: Any = time.sleep,
 ) -> ProviderResult:
     """Fetch JSON with shared cache, retry, negative-cache and error semantics."""
-    cached = cache.load(url)
+    cache_key = request_cache_key(url, headers)
+    cached = cache.load(cache_key)
+    if (
+        cached is not None
+        and isinstance(cached[1], dict)
+        and (cached[1].get("status") == "error" or cached[1].get("error"))
+    ):
+        cache.delete(cache_key)
+        cached = None
     if cached is not None:
         # 204 is an internal marker for a trustworthy empty search response;
         # callers still observe the provider's original HTTP 200 semantics.
@@ -258,9 +281,11 @@ def fetch_json(
                 except (ValueError, UnicodeDecodeError) as exc:
                     return ProviderResult(200, None, attempt, error=f"invalid JSON: {exc}")
                 else:
+                    if isinstance(payload, dict) and (payload.get("status") == "error" or payload.get("error")):
+                        return ProviderResult(200, payload, attempt, error="provider error response")
                     if isinstance(payload, (dict, list)):
                         try:
-                            cache.store(url, payload, status=204 if payload == [] else 200)
+                            cache.store(cache_key, payload, status=204 if payload == [] else 200)
                         except OSError:
                             pass
                         return ProviderResult(200, payload, attempt)
@@ -272,7 +297,7 @@ def fetch_json(
                     )
             elif last_status == 404:
                 try:
-                    cache.store(url, None, status=404)
+                    cache.store(cache_key, None, status=404)
                 except OSError:
                     pass
                 return ProviderResult(404, None, attempt, error="not found")
