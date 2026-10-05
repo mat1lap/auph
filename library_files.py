@@ -44,6 +44,6 @@ def iter_library_flacs(root: Path) -> list[Path]:
 
 
 def abandoned_transactions(root: Path) -> list[Path]:
-    """Return transaction directories for review; recovery is intentionally manual."""
+    """Return transaction directories for review or explicit journal recovery."""
     root = Path(root).resolve()
     return sorted(path for path in root.rglob(".metadata-transaction-*") if path.is_dir())

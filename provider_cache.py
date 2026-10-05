@@ -20,6 +20,8 @@ from typing import Any, Protocol
 
 import requests
 
+from process_lock import file_lock, lock_directory
+
 
 class JsonResponse(Protocol):
     status_code: int
@@ -32,7 +34,7 @@ class JsonSession(Protocol):
 
 
 SCHEMA_VERSION = 2
-PARSER_VERSION = "2026-10-04-lyrics-v9"
+PARSER_VERSION = "2026-10-05-lyrics-v10"
 
 
 def redact_secrets(message: str) -> str:
@@ -54,6 +56,7 @@ class ProviderResult:
     attempts: int
     cached: bool = False
     error: str = ""
+    failure_classification: str = ""
 
     @property
     def ok(self) -> bool:
@@ -62,6 +65,8 @@ class ProviderResult:
     @property
     def classification(self) -> str:
         """Acquisition semantics suitable for logs and negative-cache policy."""
+        if self.failure_classification:
+            return self.failure_classification
         if self.status == 404:
             return "NOT_FOUND"
         if self.status == 429:
@@ -103,7 +108,11 @@ class JsonCache:
             stat = path.stat()
             if stat.st_size == 0 or stat.st_size > 10_100_000:
                 return None
-            obj = json.loads(path.read_text(encoding="utf-8"))
+            with path.open("rb") as handle:
+                raw = handle.read(10_100_001)
+            if len(raw) > 10_100_000:
+                return None
+            obj = json.loads(raw)
         except (OSError, json.JSONDecodeError, UnicodeError):
             return None
         if isinstance(obj, dict) and ("cache_schema" in obj or "parser_version" in obj):
@@ -111,6 +120,7 @@ class JsonCache:
                 obj.get("cache_schema") != SCHEMA_VERSION
                 or obj.get("parser_version") != PARSER_VERSION
                 or "payload" not in obj
+                or obj.get("key_sha256") != hashlib.sha256(key.encode("utf-8")).hexdigest()
             ):
                 return None
         if (
@@ -124,6 +134,12 @@ class JsonCache:
             except (TypeError, ValueError, OverflowError):
                 return None
             if status not in {200, 204, 404}:
+                return None
+            if status == 404 and obj["payload"] is not None:
+                return None
+            if status == 204 and obj["payload"] != []:
+                return None
+            if status == 200 and not isinstance(obj["payload"], (dict, list)):
                 return None
             ttl = self.negative_ttl_seconds if status in {204, 404} else self.ttl_seconds
             if time.time() - stat.st_mtime > ttl:
@@ -202,6 +218,29 @@ def request_cache_key(url: str, headers: dict[str, str]) -> str:
     return f"{url}\nrequest-context:{digest}"
 
 
+def session_cache_key(session: JsonSession, url: str, headers: dict[str, str]) -> str:
+    """Use the headers/cookies/auth Requests will actually send to this URL."""
+    if isinstance(session, requests.Session):
+        prepared = session.prepare_request(requests.Request("GET", url, headers=headers))
+        return request_cache_key(prepared.url or url, dict(prepared.headers))
+    return request_cache_key(url, headers)
+
+
+def error_envelope_classification(payload: dict[str, Any]) -> str:
+    """Classify explicit error messages without guessing provider-specific codes."""
+    error = payload.get("error")
+    message = str(error.get("message") if isinstance(error, dict) else error or "").casefold()
+    if any(
+        phrase in message for phrase in ("invalid api key", "invalid token", "unauthorized", "authentication required")
+    ):
+        return "AUTHENTICATION_ERROR"
+    if any(phrase in message for phrase in ("rate limit", "too many requests")):
+        return "RATE_LIMITED"
+    if any(phrase in message for phrase in ("temporarily unavailable", "service unavailable")):
+        return "TRANSIENT_ERROR"
+    return "INVALID_RESPONSE"
+
+
 def fetch_json(
     session: JsonSession,
     url: str,
@@ -214,7 +253,7 @@ def fetch_json(
     sleeper: Any = time.sleep,
 ) -> ProviderResult:
     """Fetch JSON with shared cache, retry, negative-cache and error semantics."""
-    cache_key = request_cache_key(url, headers)
+    cache_key = session_cache_key(session, url, headers)
     cached = cache.load(cache_key)
     if (
         cached is not None
@@ -282,12 +321,26 @@ def fetch_json(
                     return ProviderResult(200, None, attempt, error=f"invalid JSON: {exc}")
                 else:
                     if isinstance(payload, dict) and (payload.get("status") == "error" or payload.get("error")):
-                        return ProviderResult(200, payload, attempt, error="provider error response")
+                        return ProviderResult(
+                            200,
+                            payload,
+                            attempt,
+                            error="provider error response",
+                            failure_classification=error_envelope_classification(payload),
+                        )
                     if isinstance(payload, (dict, list)):
-                        try:
-                            cache.store(cache_key, payload, status=204 if payload == [] else 200)
-                        except OSError:
-                            pass
+                        vary = {
+                            name.strip().casefold()
+                            for name in str(response_headers.get("Vary", "")).split(",")
+                            if name.strip()
+                        }
+                        # Unknown representation dimensions cannot safely share
+                        # the current key. Return the data but do not persist it.
+                        if vary <= {"authorization", "cookie", "accept-language", "accept-encoding"}:
+                            try:
+                                cache.store(cache_key, payload, status=204 if payload == [] else 200)
+                            except OSError:
+                                pass
                         return ProviderResult(200, payload, attempt)
                     return ProviderResult(
                         200,
@@ -333,13 +386,36 @@ def fetch_json(
 class IntervalRateLimiter:
     """Thread-safe minimum spacing between calls to one documented API."""
 
-    def __init__(self, interval_seconds: float) -> None:
+    def __init__(self, interval_seconds: float, *, shared_name: str = "") -> None:
+        self.shared_name = shared_name
         self.interval_seconds = max(0.0, interval_seconds)
         self._lock = threading.Lock()
         self._last = 0.0
 
     def acquire(self) -> None:
         with self._lock:
+            if self.shared_name:
+                key = hashlib.sha256(self.shared_name.encode()).hexdigest()
+                state = lock_directory() / f"rate-{key}"
+                with file_lock(state):
+                    descriptor = os.open(state, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+                    try:
+                        raw = os.read(descriptor, 128)
+                        try:
+                            last = float(raw) if raw else 0.0
+                        except ValueError:
+                            last = 0.0
+                        # Wall-clock jumps/reboots cannot impose an unbounded wait.
+                        elapsed = time.time() - last if math.isfinite(last) else self.interval_seconds
+                        wait = min(self.interval_seconds, max(0.0, self.interval_seconds - elapsed))
+                        if wait:
+                            time.sleep(wait)
+                        os.lseek(descriptor, 0, os.SEEK_SET)
+                        os.ftruncate(descriptor, 0)
+                        os.write(descriptor, repr(time.time()).encode("ascii"))
+                    finally:
+                        os.close(descriptor)
+                return
             wait = self.interval_seconds - (time.monotonic() - self._last)
             if wait > 0:
                 time.sleep(wait)
@@ -347,5 +423,5 @@ class IntervalRateLimiter:
 
 
 # Discovery and enrichment must share host pacing within one application.
-MUSICBRAINZ_LIMITER = IntervalRateLimiter(1.1)
-DISCOGS_LIMITER = IntervalRateLimiter(1.0)
+MUSICBRAINZ_LIMITER = IntervalRateLimiter(1.1, shared_name="musicbrainz.org")
+DISCOGS_LIMITER = IntervalRateLimiter(1.0, shared_name="api.discogs.com")

@@ -1,5 +1,8 @@
 # Whole-project audit — 2026-10-04
 
+Current follow-up: [IMPLEMENTATION_BACKLOG.md](IMPLEMENTATION_BACKLOG.md) records the
+2026-10-05 implementation and verification; older findings/counts below are historical.
+
 Baseline: clean checkout `87e9d4d` in `/home/emvis/Music/auph`.
 No repository/ancestor AGENTS instructions were present. Production dependencies
 and development checks come from requirements files and `ruff.toml`; no missing

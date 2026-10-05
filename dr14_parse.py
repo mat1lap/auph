@@ -13,7 +13,9 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 import unicodedata
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -32,48 +34,93 @@ def compute_dr14_samples(samples: np.ndarray, fs: int) -> tuple[int, str, str]:
     """
     if fs <= 0 or samples.ndim not in {1, 2} or not samples.size or not np.isfinite(samples).all():
         raise ValueError("DR measurement requires nonempty finite PCM and a positive sample rate")
-    if len(samples.shape) == 1:
+    if samples.ndim == 1:
         samples = samples.reshape(-1, 1)
-    ch = samples.shape[1]
-    delta_fs = 60 if fs == 44100 else 0
-    block_samples = 3 * (fs + delta_fs)
-    seg_cnt = int(np.ceil(samples.shape[0] / block_samples))
+    block_size = 3 * (fs + (60 if fs == 44100 else 0))
+    return compute_dr14_blocks(samples[start : start + block_size] for start in range(0, len(samples), block_size))
 
-    rms = np.zeros((seg_cnt, ch))
-    peaks = np.zeros((seg_cnt, ch))
-    curr_sam = 0
-    for i in range(seg_cnt):
-        block = samples[curr_sam : curr_sam + block_samples, :]
-        rms[i, :] = np.sqrt(2.0 * np.sum(block**2, axis=0) / float(len(block)))
-        peaks[i, :] = np.max(np.abs(block), axis=0)
-        curr_sam += block_samples
 
-    peaks = np.sort(peaks, axis=0)
-    rms = np.sort(rms, axis=0)
+def compute_dr14_blocks(blocks: Iterable[np.ndarray]) -> tuple[int, str, str]:
+    """Aggregate bounded PCM blocks with the same measured DR/peak/RMS contract."""
+    rms_rows: list[np.ndarray] = []
+    peak_rows: list[np.ndarray] = []
+    energy: np.ndarray | None = None
+    count = 0
+    for block in blocks:
+        if block.ndim != 2 or not block.size or not np.isfinite(block).all():
+            raise ValueError("invalid PCM measurement block")
+        block_energy = np.sum(block**2, axis=0)
+        if energy is None:
+            energy = np.zeros(block.shape[1])
+        if len(energy) != block.shape[1]:
+            raise ValueError("PCM channel count changed")
+        energy += block_energy
+        count += len(block)
+        rms_rows.append(np.sqrt(2.0 * block_energy / len(block)))
+        peak_rows.append(np.max(np.abs(block), axis=0))
+    if energy is None or not count:
+        raise ValueError("no PCM measurement blocks")
+    rms = np.sort(np.asarray(rms_rows), axis=0)
+    peaks = np.sort(np.asarray(peak_rows), axis=0)
+    seg_cnt, ch = rms.shape
     n_blk = max(1, int(np.floor(seg_cnt * 0.2)))
-    r = np.arange(seg_cnt - n_blk, seg_cnt)
-    rms_sum = np.sum(rms[r, :] ** 2, axis=0)
-
-    sec_peaks = np.maximum(peaks[max(0, seg_cnt - 2), :], 1e-12)
+    rms_sum = np.sum(rms[-n_blk:] ** 2, axis=0)
+    sec_peaks = np.maximum(peaks[max(0, seg_cnt - 2)], 1e-12)
     active = rms_sum > 1e-24
     ch_dr14 = np.zeros(ch)
     ch_dr14[active] = -20.0 * np.log10(np.sqrt(rms_sum[active] / n_blk) / sec_peaks[active])
     dr14 = max(0, round(float(np.mean(ch_dr14))))
-
-    max_peak = float(np.max(peaks))
-    peak_db = 20.0 * np.log10(max(max_peak, 1e-12))
-    if max_peak >= 0.9999 or peak_db >= -0.005:
-        peak_str = "over"
-    else:
-        peak_str = f"{peak_db:.2f} dB"
-
-    y_rms = float(np.mean(np.sqrt(2.0 * np.mean(samples**2, axis=0))))
-    rms_db = 20.0 * np.log10(max(y_rms, 1e-12))
-    if abs(rms_db) < 0.005:
-        rms_str = "0.00 dB"
-    else:
-        rms_str = f"{rms_db:.2f} dB"
+    peak_db = 20.0 * np.log10(max(float(np.max(peaks)), 1e-12))
+    rms_db = 20.0 * np.log10(max(float(np.mean(np.sqrt(2.0 * energy / count))), 1e-12))
+    peak_str = "over" if peak_db >= -0.005 else f"{peak_db:.2f} dB"
+    rms_str = "0.00 dB" if abs(rms_db) < 0.005 else f"{rms_db:.2f} dB"
     return dr14, peak_str, rms_str
+
+
+def decode_pcm(raw: bytes, width: int, channels: int, *, unsigned_eight_bit: bool = False) -> np.ndarray:
+    if width not in {1, 2, 3, 4} or channels <= 0 or len(raw) % (width * channels):
+        raise ValueError("unsupported or truncated PCM geometry")
+    if width == 1:
+        if unsigned_eight_bit:
+            samples = (np.frombuffer(raw, dtype=np.uint8).astype(np.float64) - 128.0) / 128.0
+        else:
+            samples = np.frombuffer(raw, dtype=np.int8).astype(np.float64) / 128.0
+    elif width == 3:
+        values = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 3).astype(np.int32)
+        signed = values[:, 0] | (values[:, 1] << 8) | (values[:, 2] << 16)
+        signed = (signed ^ 0x800000) - 0x800000
+        samples = signed.astype(np.float64) / 8388608.0
+    else:
+        samples = np.frombuffer(raw, dtype=f"<i{width}").astype(np.float64) / (2 ** (8 * width - 1))
+    return samples.reshape(-1, channels)
+
+
+DR_ALGORITHM_VERSION = "native_dr14_v2"
+
+
+def iter_flac_pcm(path: Path, *, block_frames: int | None = None) -> Iterator[np.ndarray]:
+    """Decode on disk, then yield bounded float PCM blocks with verified geometry."""
+    from mutagen.flac import FLAC
+
+    audio = FLAC(str(path))
+    bps, channels, fs = audio.info.bits_per_sample, audio.info.channels, audio.info.sample_rate
+    if bps not in {8, 16, 24, 32} or channels <= 0 or fs <= 0:
+        raise ValueError(f"unsupported FLAC PCM geometry: {bps}/{channels}/{fs}")
+    width = bps // 8
+    frames = block_frames if block_frames is not None else 3 * (fs + (60 if fs == 44100 else 0))
+    if frames <= 0:
+        raise ValueError("PCM block size must be positive")
+    cmd = ["flac", "-d", "-c", "-s", "--force-raw-format", "--endian=little", "--sign=signed", str(path)]
+    with tempfile.TemporaryFile() as pcm, tempfile.TemporaryFile() as errors:
+        result = subprocess.run(cmd, stdout=pcm, stderr=errors, check=False, timeout=300)
+        if result.returncode:
+            errors.seek(0)
+            raise RuntimeError(f"FLAC decoder failed: {errors.read(16384).decode('utf-8', errors='replace')}")
+        if pcm.tell() != audio.info.total_samples * channels * width:
+            raise ValueError("decoded PCM length disagrees with FLAC stream geometry")
+        pcm.seek(0)
+        for raw in iter(lambda: pcm.read(frames * channels * width), b""):
+            yield decode_pcm(raw, width, channels)
 
 
 def measure_audio_file(file_path: Path) -> dict[str, object]:
@@ -85,68 +132,31 @@ def measure_audio_file(file_path: Path) -> dict[str, object]:
             from mutagen.flac import FLAC
 
             audio = FLAC(str(p))
-            bps = audio.info.bits_per_sample
-            channels = audio.info.channels
             fs = audio.info.sample_rate
             total_secs = audio.info.length
         except (OSError, ValueError) as exc:
             raise ValueError(f"cannot read FLAC stream geometry: {p.name}") from exc
 
-        cmd = ["flac", "-d", "-c", "-s", "--force-raw-format", "--endian=little", "--sign=signed", str(p)]
-        proc = subprocess.run(cmd, capture_output=True, check=True, timeout=300)
-        raw = proc.stdout
-        if bps == 8:
-            s = np.frombuffer(raw, dtype=np.int8).astype(np.float64) / 128.0
-        elif bps == 16:
-            s = np.frombuffer(raw, dtype=np.int16).astype(np.float64) / 32768.0
-        elif bps == 24:
-            a = np.frombuffer(raw, dtype=np.uint8)
-            a0 = a[0::3].astype(np.int32)
-            a1 = a[1::3].astype(np.int32) << 8
-            a2 = a[2::3].astype(np.int32) << 16
-            sign_extend = np.where(a2 & 0x800000, 0xFF000000, 0)
-            s = ((a0 | a1 | a2 | sign_extend).astype(np.int32)).astype(np.float64) / 8388608.0
-        elif bps == 32:
-            s = np.frombuffer(raw, dtype="<i4").astype(np.float64) / 2147483648.0
-        else:
-            raise ValueError(f"unsupported FLAC PCM depth: {bps}")
-
-        if channels > 1:
-            s = s.reshape(-1, channels)
-        else:
-            s = s.reshape(-1, 1)
-
-        dr_val, peak_str, rms_str = compute_dr14_samples(s, fs)
+        dr_val, peak_str, rms_str = compute_dr14_blocks(iter_flac_pcm(p))
     elif ext in (".wav", ".wave"):
         import wave
 
         with wave.open(str(p), "rb") as wf:
             channels = wf.getnchannels()
-            sampwidth = wf.getsampwidth()
+            width = wf.getsampwidth()
             fs = wf.getframerate()
             nframes = wf.getnframes()
             total_secs = nframes / float(fs) if fs else 0.0
-            raw = wf.readframes(nframes)
-        if sampwidth == 2:
-            s = np.frombuffer(raw, dtype=np.int16).astype(np.float64) / 32768.0
-        elif sampwidth == 3:
-            a = np.frombuffer(raw, dtype=np.uint8)
-            a0 = a[0::3].astype(np.int32)
-            a1 = a[1::3].astype(np.int32) << 8
-            a2 = a[2::3].astype(np.int32) << 16
-            sign_extend = np.where(a2 & 0x800000, 0xFF000000, 0)
-            s = ((a0 | a1 | a2 | sign_extend).astype(np.int32)).astype(np.float64) / 8388608.0
-        elif sampwidth == 4:
-            s = np.frombuffer(raw, dtype=np.int32).astype(np.float64) / 2147483648.0
-        else:
-            s = (np.frombuffer(raw, dtype=np.uint8).astype(np.float64) - 128.0) / 128.0
-
-        if channels > 1:
-            s = s.reshape(-1, channels)
-        else:
-            s = s.reshape(-1, 1)
-
-        dr_val, peak_str, rms_str = compute_dr14_samples(s, fs)
+            block_frames = 3 * (fs + (60 if fs == 44100 else 0))
+            if fs <= 0:
+                raise ValueError("invalid WAV sample rate")
+            blocks = (
+                decode_pcm(raw, width, channels, unsigned_eight_bit=True)
+                for raw in iter(lambda: wf.readframes(block_frames), b"")
+            )
+            dr_val, peak_str, rms_str = compute_dr14_blocks(blocks)
+            if wf.tell() != nframes:
+                raise ValueError("truncated WAV audio")
     else:
         raise ValueError(f"Direct measurement unsupported for extension: {ext}")
 

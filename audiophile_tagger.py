@@ -46,6 +46,8 @@ import requests
 from mutagen import MutagenError
 from mutagen.flac import FLAC
 
+import album_transaction
+
 # In-process pipeline imports
 import audiophile_cover_fetcher
 import discogs_release_find
@@ -61,6 +63,7 @@ import metadata_writer
 import release_match
 from album_completeness import assess_album_completeness
 from album_lock import exclusive_album
+from http_sessions import isolated_worker_session
 from library_files import iter_library_flacs
 from pipeline_config import load_config
 from provider_cache import DISCOGS_LIMITER, MUSICBRAINZ_LIMITER, JsonCache, fetch_json
@@ -1082,25 +1085,7 @@ def get_track_eac_peak(rip_meta_files: list[Path], track_num: int, flac_path: Pa
     # 2. Fallback: Bit-accurate PCM sample peak measurement (standard EAC formula)
     if flac_path and flac_path.is_file():
         try:
-            audio = FLAC(str(flac_path))
-            bps = audio.info.bits_per_sample
-            cmd = ["flac", "-d", "-c", "-s", "--force-raw-format", "--endian=little", "--sign=signed", str(flac_path)]
-            proc = subprocess.run(cmd, capture_output=True, check=True, timeout=300)
-            raw = proc.stdout
-            if bps == 8:
-                s = np.frombuffer(raw, dtype=np.int8).astype(np.float64) / 128.0
-            elif bps == 16:
-                s = np.frombuffer(raw, dtype=np.int16).astype(np.float64) / 32768.0
-            elif bps == 24:
-                a = np.frombuffer(raw, dtype=np.uint8)
-                a0 = a[0::3].astype(np.int32)
-                a1 = a[1::3].astype(np.int32) << 8
-                a2 = a[2::3].astype(np.int32) << 16
-                sign_extend = np.where(a2 & 0x800000, 0xFF000000, 0)
-                s = ((a0 | a1 | a2 | sign_extend).astype(np.int32)).astype(np.float64) / 8388608.0
-            else:
-                s = np.frombuffer(raw, dtype=np.int32).astype(np.float64) / 2147483648.0
-            max_val = float(np.max(np.abs(s)))
+            max_val = max(float(np.max(np.abs(block))) for block in dr14_parse.iter_flac_pcm(flac_path))
             return f"{max_val * 100.0:.1f} %"
         except Exception:
             pass
@@ -1298,30 +1283,20 @@ def compute_bpm_from_pcm(flac_path: Path) -> str:
         if sr <= 0 or channels <= 0:
             return ""
 
-        cmd = ["flac", "-d", "-c", "-s", "--force-raw-format", "--endian=little", "--sign=signed", str(flac_path)]
-        proc = subprocess.run(cmd, capture_output=True, check=True, timeout=300)
-        raw = proc.stdout
-        if bps == 16:
-            samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-        elif bps == 24:
-            a = np.frombuffer(raw, dtype=np.uint8)
-            a0 = a[0::3].astype(np.int32)
-            a1 = a[1::3].astype(np.int32) << 8
-            a2 = a[2::3].astype(np.int32) << 16
-            sign_extend = np.where(a2 & 0x800000, 0xFF000000, 0)
-            samples = ((a0 | a1 | a2 | sign_extend).astype(np.int32)).astype(np.float32) / 8388608.0
-        else:
+        if bps not in {8, 16, 24, 32}:
             return ""
-
-        if channels > 1:
-            samples = samples.reshape(-1, channels).mean(axis=1)
-
         hop = max(1, sr // 1000)
-        env = np.abs(samples)
-        n_frames = len(env) // hop
-        if n_frames < 2000:
+        envelopes = []
+        for block in dr14_parse.iter_flac_pcm(flac_path, block_frames=hop * 1000):
+            mono = block.astype(np.float32).mean(axis=1)
+            frames = len(mono) // hop
+            if frames:
+                envelopes.append(np.abs(mono[: frames * hop]).reshape(frames, hop).mean(axis=1))
+        if not envelopes:
             return ""
-        env = env[: n_frames * hop].reshape(n_frames, hop).mean(axis=1)
+        env = np.concatenate(envelopes)
+        if len(env) < 2000:
+            return ""
         env -= np.mean(env)
 
         fps = sr / hop
@@ -1849,6 +1824,7 @@ def measure_album_dr14(
     return track_map, album_dr, dr_db_info
 
 
+@isolated_worker_session
 def process_single_track(
     f: Path,
     folder: Path,
@@ -2778,7 +2754,7 @@ def process_single_track(
             manifest_tags.append(("ALBUM_MIN_DR", str(album_tags["min_dr"])))
         if album_tags.get("max_dr"):
             manifest_tags.append(("ALBUM_MAX_DR", str(album_tags["max_dr"])))
-        manifest_tags.append(("DR_SOURCE", album_tags.get("dr_source", "native_dr14")))
+        manifest_tags.append(("DR_SOURCE", album_tags.get("dr_source", dr14_parse.DR_ALGORITHM_VERSION)))
 
     if album_tags.get("dr_loudness_war_id"):
         manifest_tags.append(("DR_LOUDNESS_WAR_ID", str(album_tags["dr_loudness_war_id"])))
@@ -3067,7 +3043,9 @@ def process_single_track(
             for decision in write_report.decisions:
                 counts[decision.action.value] = counts.get(decision.action.value, 0) + 1
             summary = ", ".join(f"{name}={count}" for name, count in sorted(counts.items()))
-            return True, f"DRY RUN {f.name}: {summary or 'no changes'}"
+            return True, f"DRY RUN {f.name}: {summary or 'no changes'}\n" + json.dumps(
+                write_report.changes, ensure_ascii=False, sort_keys=True
+            )
         if is_verbose:
             print(f"[VERBOSE][METADATA] Tags successfully committed to '{f.name}'.")
             if review_fields:
@@ -3195,6 +3173,12 @@ def run_loudgain(
             cmd.extend(("-s", "e" if loudness_policy.retain_enhanced_tags else "i"))
             if quiet and not is_verbose:
                 cmd.append("-q")
+            if outcome is not None:
+                outcome["command_profile"] = json.dumps(cmd[1:])
+                binary = Path(lg_bin)
+                if binary.is_file():
+                    with binary.open("rb") as handle:
+                        outcome["scanner_executable_sha256"] = hashlib.file_digest(handle, "sha256").hexdigest()
             cmd.extend(str(pending) for _original, pending in staged)
 
             if is_verbose:
@@ -3444,6 +3428,13 @@ def process_album(
 
     folder = Path(folder_str).resolve()
     if not folder.is_dir():
+        return False
+
+    if album_transaction.unfinished_transactions(folder):
+        print(
+            "ERROR: journaled album commit requires recovery; run album_transaction.py on this album first.",
+            file=sys.stderr,
+        )
         return False
 
     flac_files = iter_library_flacs(folder)
@@ -4433,7 +4424,7 @@ def process_album(
     # Dynamic Range / DR14 Album measurement
     dr_track_map: dict[str, tuple[str, str, str]] = {}
     album_dr = ""
-    dr_src = "native_dr14"
+    dr_src = dr14_parse.DR_ALGORITHM_VERSION
     generated_dr_reports: list[str] = []
     if no_dr14 or dry_run:
         if not quiet:
@@ -4757,8 +4748,17 @@ def process_album(
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "tool": loudness_outcome["tool"],
                 "mode": loudness_outcome["mode"],
-                "reference_loudness": "-18 LUFS",
-                "prevent_clipping": bool(load_config().loudness.prevent_clipping),
+                "reference_loudness": "-18 LUFS" if loudness_outcome["tool"] == "loudgain" else None,
+                "prevent_clipping": bool(load_config().loudness.prevent_clipping)
+                if loudness_outcome["tool"] == "loudgain"
+                else None,
+                "peak_kind": "true-peak"
+                if loudness_outcome["tool"] == "loudgain"
+                else "existing measurement; unverified origin",
+                "command_profile": json.loads(loudness_outcome["command_profile"])
+                if loudness_outcome.get("command_profile")
+                else None,
+                "scanner_executable_sha256": loudness_outcome.get("scanner_executable_sha256"),
                 "files": [str(path.relative_to(folder)) for path in flac_files],
             }
             with pending_ledger.open("a", encoding="utf-8") as handle:
@@ -4782,6 +4782,38 @@ def process_album(
         cover_was_replaced = False
         cover_backup = backup_root / "cover.jpg"
         try:
+            outputs = [(pending_files[original], original) for original in flac_files]
+            for sidecar in sorted(pending_root.rglob("*")):
+                if sidecar.is_file() and sidecar.suffix.casefold() != ".flac":
+                    destination = folder / sidecar.relative_to(pending_root)
+                    if not destination.exists():
+                        outputs.append((sidecar, destination))
+            if cover_tmp.is_file() and (not cover_file.exists() or replace_cover_file):
+                if cover_file.exists():
+                    previous_digest = hashlib.sha256(cover_file.read_bytes()).hexdigest()[:16]
+                    previous_cover = folder / f"cover.previous.{previous_digest}{cover_file.suffix.lower()}"
+                    if not previous_cover.exists():
+                        outputs.append((cover_file, previous_cover))
+                outputs.append((cover_tmp, cover_file))
+            if cover_source_tmp and cover_source_tmp.is_file():
+                source_destination = folder / f"cover.original{cover_source_tmp.suffix.lower()}"
+                if source_destination.exists() and source_destination.read_bytes() != cover_source_tmp.read_bytes():
+                    source_destination = folder / (
+                        f"cover.original.{selected_cover.source_sha256[:16] if selected_cover else 'unknown'}"
+                        f"{cover_source_tmp.suffix.lower()}"
+                    )
+                if not source_destination.exists():
+                    outputs.append((cover_source_tmp, source_destination))
+            if pending_ledger.is_file():
+                final_ledger = folder / ".metadata-provenance.jsonl"
+                if final_ledger.is_symlink():
+                    raise ValueError("refusing symlinked provenance ledger")
+                merged_ledger = transaction_dir / "merged-ledger.jsonl"
+                merged_ledger.write_bytes(
+                    (final_ledger.read_bytes() if final_ledger.exists() else b"") + pending_ledger.read_bytes()
+                )
+                outputs.append((merged_ledger, final_ledger))
+            album_transaction.prepare_commit(folder, transaction_dir, outputs)
             for original in flac_files:
                 relative = original.relative_to(folder)
                 backup = backup_root / relative
@@ -4843,7 +4875,21 @@ def process_album(
             if pending_ledger.is_file():
                 final_ledger = folder / ".metadata-provenance.jsonl"
                 commit_provenance_ledger(final_ledger, pending_ledger)
+            album_transaction.finish_commit(folder, transaction_dir)
         except BaseException as exc:
+            if (transaction_dir / album_transaction.JOURNAL).is_file():
+                try:
+                    album_transaction.reset_for_rollback(transaction_dir)
+                except BaseException as journal_exc:
+                    print(
+                        f"CRITICAL: cannot re-arm recovery journal ({journal_exc}); outputs and snapshots retained in {transaction_dir}",
+                        file=sys.stderr,
+                    )
+                    if not isinstance(journal_exc, Exception):
+                        raise
+                    if not isinstance(exc, Exception):
+                        raise exc
+                    return False
             rollback_errors: list[str] = []
             for original in committed:
                 # A replacement that raised before publication still has its
@@ -4870,6 +4916,11 @@ def process_album(
                     os.replace(cover_backup, cover_file)
                 except OSError as rollback_exc:
                     rollback_errors.append(f"cover.jpg: {rollback_exc}")
+            if not rollback_errors and (transaction_dir / album_transaction.JOURNAL).is_file():
+                try:
+                    album_transaction.recover_transaction(folder, transaction_dir)
+                except (OSError, ValueError, TypeError, KeyError) as recovery_exc:
+                    rollback_errors.append(f"journal recovery: {recovery_exc}")
             if rollback_errors:
                 print(
                     f"CRITICAL: Album commit failed ({exc}); rollback is incomplete. "

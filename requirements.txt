@@ -4,3 +4,4 @@ mutagen==1.48.1
 numpy==2.5.3
 pillow==12.3.0
 requests==2.34.2
+PyYAML==6.0.3

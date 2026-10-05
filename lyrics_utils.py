@@ -45,11 +45,13 @@ from lyrics_quality import (
     validate_lrc,
     version_signature,
 )
+from lyricsfile import parse_lyricsfile
 from provider_cache import IntervalRateLimiter, JsonCache, ProviderResult, fetch_json, redact_secrets, retry_delay
 
 _LRCLIB_LOCK = threading.Lock()
 _LRCLIB_LAST_REQUEST = 0.0
 _LRCLIB_SESSION = None
+_LRCLIB_THREAD_SESSIONS = threading.local()
 _LRCLIB_RATE_LIMITER = IntervalRateLimiter(0.25)
 _LYRICS_PROVIDER_STATE = threading.local()
 _PROVIDER_LIMITER_LOCK = threading.Lock()
@@ -2244,9 +2246,10 @@ def fetch_lrclib(
     """Query LRCLIB with typed failure outcomes, version-aware matching and a versioned cache."""
     import requests
 
-    global _LRCLIB_SESSION
-    if _LRCLIB_SESSION is None:
-        _LRCLIB_SESSION = requests.Session()
+    session = _LRCLIB_SESSION or getattr(_LRCLIB_THREAD_SESSIONS, "session", None)
+    if session is None:
+        session = requests.Session()
+        _LRCLIB_THREAD_SESSIONS.session = session
     headers = {
         "User-Agent": "AudiophileArchTagger/6.0 (LRCLIBClient)",
         "Accept": "application/json",
@@ -2258,7 +2261,7 @@ def fetch_lrclib(
     def get_json(url: str, expected_type: type) -> Any | None:
         nonlocal successful_responses
         result = fetch_json(
-            _LRCLIB_SESSION,
+            session,
             url,
             headers=headers,
             cache=_LRCLIB_CACHE,
@@ -2269,7 +2272,7 @@ def fetch_lrclib(
         if result.status == 404:
             successful_responses += 1
             return None
-        if result.status == 200:
+        if result.ok:
             if isinstance(result.payload, expected_type):
                 schema_ok = True
                 if expected_type is dict:
@@ -2279,7 +2282,7 @@ def fetch_lrclib(
                         and "trackName" in item
                         and "artistName" in item
                         and "duration" in item
-                        and any(key in item for key in ("plainLyrics", "syncedLyrics", "instrumental"))
+                        and any(key in item for key in ("plainLyrics", "syncedLyrics", "instrumental", "lyricsfile"))
                     )
                 elif expected_type is list and isinstance(result.payload, list):
                     schema_ok = all(
@@ -2307,7 +2310,21 @@ def fetch_lrclib(
     def result_from(item: dict[str, Any], source: str, *, exact: bool = False) -> dict[str, Any]:
         synced = str(item.get("syncedLyrics") or "")
         plain = str(item.get("plainLyrics") or "")
-        return {
+        rich_forms: dict[str, Any] = {}
+        if item.get("lyricsfile"):
+            try:
+                rich_forms = parse_lyricsfile(
+                    str(item["lyricsfile"]),
+                    title=str(item.get("trackName") or ""),
+                    artist=str(item.get("artistName") or ""),
+                    duration=duration,
+                )
+                plain = plain or str(rich_forms.get("plainLyrics") or "")
+                synced = synced or str(rich_forms.get("syncedLyrics") or "")
+            except (ValueError, TypeError) as exc:
+                rich_forms = {"validationWarnings": [f"Lyricsfile rejected: {exc}"]}
+                failures.append(ProviderResult(200, None, 1, error="invalid LRCLIB Lyricsfile"))
+        candidate = {
             "source": source,
             "id": item.get("id"),
             "trackName": item.get("trackName") or "",
@@ -2328,8 +2345,16 @@ def fetch_lrclib(
                 and item.get("artistName")
                 and is_track_match(item.get("trackName", ""), item.get("artistName", ""), song, artist)
             ),
-            "found": True,
+            "found": bool(plain or synced),
         }
+        for field in ("enhancedLyrics", "ttmlLyrics", "ttml_source_timing"):
+            if rich_forms.get(field):
+                candidate[field] = rich_forms[field]
+        candidate["language"] = candidate["language"] or rich_forms.get("language", "")
+        candidate["validationWarnings"] = rich_forms.get("validationWarnings", rich_forms.get("warnings", []))
+        if rich_forms.get("plainLyrics") or rich_forms.get("syncedLyrics"):
+            candidate["transformations"] = ["Lyricsfile 1.0 draft parsed; supplied millisecond timing retained"]
+        return candidate
 
     params = {"track_name": song.strip(), "artist_name": artist.strip()}
     if album.strip():
@@ -2392,7 +2417,7 @@ def fetch_lrclib(
                 "identity_validated": True,
                 "acquisition_status": "INSTRUMENTAL",
             }
-    if isinstance(exact, dict) and (exact.get("syncedLyrics") or exact.get("plainLyrics")):
+    if isinstance(exact, dict) and (exact.get("syncedLyrics") or exact.get("plainLyrics") or exact.get("lyricsfile")):
         exact_duration = exact.get("duration")
         try:
             parsed_exact_duration = float(exact_duration) if exact_duration is not None else None
@@ -2412,7 +2437,8 @@ def fetch_lrclib(
         )
         if identity_ok:
             candidate = result_from(exact, "LRCLIB (exact)", exact=True)
-            candidate_pool.append(candidate)
+            if candidate["found"]:
+                candidate_pool.append(candidate)
 
     search_urls = [
         f"https://lrclib.net/api/search?{urllib.parse.urlencode({'track_name': song.strip(), 'artist_name': artist.strip()})}",
@@ -2431,7 +2457,9 @@ def fetch_lrclib(
         if not isinstance(items, list):
             continue
         for item in items:
-            if not isinstance(item, dict) or not (item.get("syncedLyrics") or item.get("plainLyrics")):
+            if not isinstance(item, dict) or not (
+                item.get("syncedLyrics") or item.get("plainLyrics") or item.get("lyricsfile")
+            ):
                 continue
             candidate_title = str(item.get("trackName") or "")
             candidate_artist = str(item.get("artistName") or "")
@@ -2446,7 +2474,8 @@ def fetch_lrclib(
                 continue
             candidate = result_from(item, source_name)
             candidate["identity_validated"] = bool(candidate_title and candidate_artist)
-            matched.append(candidate)
+            if candidate["found"]:
+                matched.append(candidate)
 
     def rank(candidate: dict[str, Any]) -> tuple[int, int, int, str]:
         candidate_duration = candidate.get("duration")
@@ -2478,7 +2507,14 @@ def fetch_lrclib(
         return selected
 
     if failures:
-        severity = {"BLOCKED": 5, "RATE_LIMITED": 4, "TRANSIENT_ERROR": 3, "PARSER_ERROR": 2, "INVALID_RESPONSE": 1}
+        severity = {
+            "AUTHENTICATION_ERROR": 6,
+            "BLOCKED": 5,
+            "RATE_LIMITED": 4,
+            "TRANSIENT_ERROR": 3,
+            "PARSER_ERROR": 2,
+            "INVALID_RESPONSE": 1,
+        }
         status, error = max(
             ((failure.classification, failure.error) for failure in failures),
             key=lambda item: severity.get(item[0], 0),

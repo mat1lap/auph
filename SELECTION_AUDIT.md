@@ -1,5 +1,8 @@
 # Lyrics and artwork selection audit — 2026-10-04
 
+Current follow-up: [IMPLEMENTATION_BACKLOG.md](IMPLEMENTATION_BACKLOG.md) records the
+2026-10-05 implementation and verification; older findings/counts below are historical.
+
 Scope: the editable project in `auph`, starting at commit `f25fb71`. This audit
 covers acquisition, candidate contracts, validation/selection, materialization,
 and their tagger callers. It does not certify every upstream API or image
@@ -98,7 +101,7 @@ still expose only the supported forms documented below.
 | Lyrics provider | Discovery / detail identity | Available and retained forms/evidence | Configuration; fallback; evidence |
 |---|---|---|---|
 | Unison | title/artist search; item ID detail; bounded 20 | plain, LRC/enhanced, native TTML when supplied; raw; actual detail title/artist/album/duration/stable IDs | public observed schema; per-item typed errors and alternatives; new cascade fixture |
-| LRCLIB | title/artist/album/duration `/get`, search and item IDs | independent plain/sync, explicit instrumental, metadata; full item JSON including `lyricsfile` | public; failures distinct from empty; fixtures; lyricsfile-only YAML parsing remains unimplemented |
+| LRCLIB | title/artist/album/duration `/get`, search and item IDs | independent plain/sync, explicit instrumental, metadata; full item JSON including `lyricsfile` | public; failures distinct from empty; fixtures; bounded Lyricsfile 1.0 YAML consumption added in R06 of IMPLEMENTATION_BACKLOG.md |
 | Musixmatch | identity-compatible track.search; track ID lyrics/subtitle/richsync, up to 5 | plain, line LRC, real richsync, original bodies/subtitle metadata, language/IDs/ISRC | explicit API key or desktop token; both configured routes retained; partial lookup fallback; old/new fixtures |
 | Spotify | catalog search; track ID color-lyrics, up to 3 matches | plain/line timing, raw JSON, language/catalog identity/ISRC | explicit access token; private lyrics schema; fixtures only; independent track failures |
 | Deezer | catalog search; ARL renewal; track-ID GraphQL, up to 3 | plain, line/word sync, translations, raw JSON, catalog identity/ISRC | explicit ARL; private schema; fixtures only; bad timing retains plain |
@@ -204,7 +207,7 @@ Final configured checks, all exit status 0:
 
 CLI help checks completed without provider acquisition. There were no missing
 project modules blocking offline integration. Authenticated/private provider
-compatibility, unsupported LRCLIB lyricsfile-only parsing, changing live HTML,
+compatibility, changing live HTML,
 and legacy artwork URL availability remain unverified as described above.
 
 Existing test expectations changed only for the intentional URL/label behavior:
@@ -213,3 +216,6 @@ fixture now uses the provider host (HTTP remains mocked), and the Musixmatch
 single-credential test isolates `Path.home()` from real configured credentials.
 The auxiliary-form regression found by full testing was fixed without weakening
 its assertions.
+
+The historical LRCLIB lyricsfile-only gap is resolved by R06 in
+IMPLEMENTATION_BACKLOG.md; live LRCLIB YAML availability remains unverified.

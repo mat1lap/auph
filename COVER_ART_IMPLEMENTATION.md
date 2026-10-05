@@ -1,5 +1,8 @@
 # Cover implementation and verification record
 
+Current follow-up: [IMPLEMENTATION_BACKLOG.md](IMPLEMENTATION_BACKLOG.md) records the
+2026-10-05 implementation and verification; older findings/counts below are historical.
+
 ## 2026-10-04 audit update
 
 Album orchestration disables persistent `.cover_digital.jpg`/`.cover_scan.jpg`

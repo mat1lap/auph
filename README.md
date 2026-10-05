@@ -36,8 +36,9 @@ been removed.
   every staged FLAC validates; commit failures restore rollback copies.
 - Album commits use several individual renames. Readers can observe a mixture
   during commit; this is not an atomic album snapshot. A process crash or power
-  loss can leave a partial commit requiring manual recovery from the retained
-  `.metadata-transaction-*` tree. Do not delete that tree before reviewing it.
+  loss can leave a partial commit. Journaled updates support explicit recovery
+  through `album_transaction.py`; legacy trees need manual review. Do not delete
+  retained `.metadata-transaction-*` trees before reviewing them.
 - On POSIX systems, an advisory directory lock refuses concurrent album runs.
   It does not exclude unrelated applications editing the same files.
 - FLAC symlinks are refused because replacing a symlink would silently remove
@@ -145,7 +146,7 @@ imported as local measurements or edition identity.
 
 ## Configuration
 
-Python 3.11 or later is required. Install the tested Python dependencies with
+Python 3.12 or later is required by the pinned dependencies; the audited environment is Python 3.14. Install the tested Python dependencies with
 `python3 -m pip install -r requirements.txt`; for development checks use
 `python3 -m pip install -r requirements-dev.txt`. FLAC stream verification
 requires the `flac` executable. Generated audio fixtures use `ffmpeg`.
@@ -324,8 +325,8 @@ limits. [SELECTION_AUDIT.md](SELECTION_AUDIT.md) contains the detailed lyrics/ar
 provider and failure matrices; fixture coverage does not certify live services.
 
 Album publication remains several individual operations. Catchable commit
-interruptions attempt rollback; process termination/power loss still requires
-manual recovery. New sidecars/reports/archives are published exclusively so a
+interruptions attempt rollback. Durable journals now support explicit recovery
+after process termination; physical power-loss guarantees remain unverified. New sidecars/reports/archives are published exclusively so a
 late destination collision aborts rather than overwriting another application's
 file. This requires hard-link support on the staging filesystem; unsupported
 filesystems fail safely and trigger rollback.
@@ -335,3 +336,60 @@ handles silence, and excludes phantom empty blocks. Values may differ from old
 reports; preserved existing reports are not automatically rewritten. Partial
 measurement withholds album DR, and the measurement CLI returns nonzero on
 failure. Exact agreement with proprietary DR meters has not been certified.
+
+
+## Audit backlog implementation
+
+[IMPLEMENTATION_BACKLOG.md](IMPLEMENTATION_BACKLOG.md) maps the completed audits,
+checklists, field recommendations and remaining limits to acceptance criteria
+and current verification. Prior audit counts describe their dated checkouts.
+
+Before publishing an album or a default standalone writer update, the pipeline
+syncs a journal containing the exact destinations, prior/new hashes and recovery
+copies. A new run refuses a journaled unfinished update, including standalone
+writes in normal CD/Disc subfolders of that album. Inspect the intended
+recovery without writes, then restore an interrupted publication explicitly:
+
+```sh
+.venv/bin/python album_transaction.py --dry-run "/path/to/album"
+.venv/bin/python album_transaction.py "/path/to/album"
+```
+
+Recovery preflights all destinations and backups. It refuses symlinks, path
+traversal, damaged snapshots and unrelated later edits, retaining recovery data
+for inspection. A fully committed journal cleans up without undoing the new
+metadata. Legacy trees and standalone ledgers outside the track directory
+remain manual-recovery cases. Unknown outside-journal temporary files are left
+for inspection. Multiple replacements are still observable individually.
+
+Standalone writer and provenance locks coordinate cooperating POSIX processes.
+Track-worker headers/cookies are independent; adapter pools remain owned by the
+parent session. Custom authentication/transport callbacks retain their behavior
+but their thread safety is not certified. MusicBrainz/Discogs request spacing
+also coordinates across processes on this host. Private lock/rate state lives
+in the per-user temporary directory, outside the music collection.
+
+JSON parser/cache version is `2026-10-05-lyrics-v10`. Actual prepared session
+URL query parameters and credentials/cookies/language affect cache identity. Unknown server `Vary`
+dimensions disable persistence for that response. Explicit API error messages
+remain typed failures; parser/auth/rate failures do not become NOT_FOUND caches.
+
+LRCLIB Lyricsfile 1.0 draft YAML now contributes plain, line and supplied word
+timing. Exact YAML and provider JSON are retained separately. Duplicate keys,
+aliases, unsafe tags and unsupported versions are rejected; invalid timing
+keeps usable plain text. Offset semantics that the draft has not settled are
+archived without synchronized playback guesses. TTML derivatives require real
+source intervals; absent ends are never invented. These are fixture-verified
+contracts based on the [upstream draft](https://github.com/tranxuanthang/lyricsfile/blob/main/SPECIFICATION.md),
+not a certification of live content completeness.
+
+DR/peak/BPM processing uses disk-backed decoded PCM and bounded NumPy blocks.
+It still needs temporary storage for a full decoded FLAC and a bounded decoder
+runtime; this is not an unlimited-size guarantee. Native DR provenance uses
+`native_dr14_v2`. Scanner records include command flags and executable digest;
+metadata-only cleanup does not claim a newly measured RG2 reference or peak.
+
+Dry-run emits old/proposed values and source/confidence, including review
+proposals that were not applied. It also reports picture inventories by hash.
+Collection contents remain unchanged; private cache/lock/temp activity is
+separate from collection writes.

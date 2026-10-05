@@ -19,13 +19,17 @@ import tempfile
 import threading
 import uuid
 from collections.abc import Iterable, Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from mutagen.flac import FLAC, Picture
 
+import album_transaction
+from library_files import is_pipeline_private
 from lyrics_pipeline import display_lyrics
 from lyrics_quality import TIMESTAMP_RE, conservative_text, lrc_to_plain, validate_lrc
 from metadata_policy import Confidence, DecisionAction, FieldDecision, decide_field
@@ -39,6 +43,7 @@ from metadata_schema import (
     valid_date,
 )
 from pipeline_config import load_config
+from process_lock import file_lock, serialize_file_writer, writer_album_root
 
 FIELD_RE = re.compile(r"^[\x20-\x3c\x3e-\x7d]+$")
 _PROVENANCE_LOCK = threading.Lock()
@@ -285,6 +290,7 @@ class WriteReport:
     transaction_id: str
     decisions: tuple[FieldDecision, ...]
     provenance_path: str
+    changes: dict[str, dict[str, Any]] = dataclass_field(default_factory=dict)
 
 
 def _scope_identity_agreement(existing: dict[str, list[str]], incoming: dict[str, list[str]]) -> dict:
@@ -743,10 +749,10 @@ def _picture_inventory(audio: FLAC) -> list[dict[str, object]]:
 def publish_provenance_bytes(ledger: Path, rows: bytes) -> None:
     """Publish a ledger and restore its previous state on catchable failure.
 
-    A process kill still requires manual recovery; this is a single-file
-    replacement, not an atomic album commit.
+    This is a single-file replacement. Journaled callers can recover process
+    termination explicitly; other callers still require manual recovery.
     """
-    with _PROVENANCE_LOCK:
+    with _PROVENANCE_LOCK, file_lock(ledger):
         if ledger.is_symlink():
             raise ValueError(f"refusing symlinked provenance ledger: {ledger}")
         existed = ledger.exists()
@@ -803,6 +809,7 @@ def _append_provenance_record(ledger: Path, record: Mapping[str, Any]) -> None:
     publish_provenance_bytes(ledger, row)
 
 
+@serialize_file_writer
 def write_tags(
     flac_path: Path,
     tags: list[tuple[str, str]],
@@ -832,7 +839,11 @@ def write_tags(
     same invariants used by the verifier.  A failed save or verification leaves
     the original byte-for-byte intact.
     """
-    flac_path = Path(flac_path)
+    flac_path = Path(flac_path).absolute()
+    if not is_pipeline_private(flac_path) and any(
+        album_transaction.unfinished_transactions(folder) for folder in {flac_path.parent, writer_album_root(flac_path)}
+    ):
+        raise ValueError("journaled write requires recovery before enrichment")
     if flac_path.is_symlink():
         raise ValueError(f"refusing to replace symlinked FLAC: {flac_path}")
     before = FLAC(str(flac_path))
@@ -847,6 +858,9 @@ def write_tags(
     backup_path: Path | None = None
     replaced = False
     retain_backup = False
+    commit_journal: Path | None = None
+    commit_durable = False
+    commit_locks = ExitStack()
     lyric_archives: dict[Path, str] = {}
     published_archives: list[Path] = []
     try:
@@ -904,36 +918,51 @@ def write_tags(
                 clean_container = clean_container and source_handle.read(3) != b"TAG"
         if (
             clean_container
+            and not dry_run
             and comparable_after == comparable_before
             and _picture_inventory(after_preview) == before_pictures
         ):
             existing_id = (before_tags.get("METADATA_PROVENANCE_ID") or [""])[0]
             return WriteReport(existing_id, decisions, "")
         if dry_run:
-            return WriteReport(transaction_id, decisions, "")
+            changes: dict[str, dict[str, Any]] = {
+                key: {
+                    "before": before_tags.get(key, []),
+                    "proposed": after_tags_preview.get(key, []),
+                    "source": source,
+                    "confidence": incoming_confidence.name,
+                }
+                for key in sorted(set(before_tags) | set(after_tags_preview))
+                if key != "METADATA_PROVENANCE_ID" and before_tags.get(key, []) != after_tags_preview.get(key, [])
+            }
+            after_pictures = _picture_inventory(after_preview)
+            if after_pictures != before_pictures:
+                changes["PICTURES"] = {
+                    "before": before_pictures,
+                    "proposed": after_pictures,
+                    "source": source,
+                    "confidence": incoming_confidence.name,
+                }
+            for decision in decisions:
+                if decision.action is DecisionAction.REVIEW_REQUIRED:
+                    changes[decision.field] = {
+                        "before": before_tags.get(decision.field, []),
+                        "proposed": [
+                            clean_manifest_value(value, name)
+                            for name, value in tags
+                            if canonical_field_name(name) == decision.field and clean_manifest_value(value, name)
+                        ],
+                        "applied": False,
+                        "source": source,
+                        "confidence": incoming_confidence.name,
+                        "reason": decision.reason,
+                    }
+            return WriteReport(transaction_id, decisions, "", changes)
         for archive, payload in lyric_archives.items():
             if archive.is_symlink() or (archive.exists() and archive.read_bytes() != payload.encode("utf-8")):
                 raise FileExistsError(f"lyric archive collision: {archive}")
-        backup_fd, backup_name = tempfile.mkstemp(
-            prefix=f".{flac_path.name}.", suffix=".rollback.flac", dir=flac_path.parent
-        )
-        os.close(backup_fd)
-        backup_path = Path(backup_name)
-        shutil.copy2(flac_path, backup_path)
-        replaced = True
-        os.replace(tmp_path, flac_path)
-        for archive, payload in lyric_archives.items():
-            if not archive.exists():
-                with archive.open("x", encoding="utf-8", newline="") as handle:
-                    published_archives.append(archive)
-                    handle.write(payload)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-
         ledger = provenance_file or flac_path.parent / ".metadata-provenance.jsonl"
-        after = FLAC(str(flac_path))
-        if _stream_signature(flac_path) != before_stream:
-            raise RuntimeError("audio STREAMINFO identity changed after atomic replacement")
+        after = after_preview
         context = dict(provenance_context or {})
         record = {
             "schema_version": 1,
@@ -970,12 +999,61 @@ def write_tags(
                 for d in decisions
             ],
         }
+        if not is_pipeline_private(flac_path) and ledger.absolute().parent == flac_path.parent:
+            commit_locks.enter_context(file_lock(ledger))
+            commit_journal = Path(tempfile.mkdtemp(prefix=".metadata-transaction-writer-", dir=flac_path.parent))
+            outputs = [(tmp_path, flac_path)]
+            for index, (archive, payload) in enumerate(lyric_archives.items()):
+                if not archive.exists():
+                    staged_archive = commit_journal / f"archive-{index}"
+                    staged_archive.write_bytes(payload.encode("utf-8"))
+                    outputs.append((staged_archive, archive))
+            if load_config().preservation.provenance_ledger:
+                if ledger.is_symlink():
+                    raise ValueError("refusing symlinked provenance ledger")
+                merged = commit_journal / "merged-ledger.jsonl"
+                row = (json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+                merged.write_bytes((ledger.read_bytes() if ledger.exists() else b"") + row)
+                outputs.append((merged, ledger.absolute()))
+            album_transaction.prepare_commit(flac_path.parent, commit_journal, outputs)
+        backup_fd, backup_name = tempfile.mkstemp(
+            prefix=f".{flac_path.name}.", suffix=".rollback.flac", dir=flac_path.parent
+        )
+        os.close(backup_fd)
+        backup_path = Path(backup_name)
+        shutil.copy2(flac_path, backup_path)
+        replaced = True
+        os.replace(tmp_path, flac_path)
+        for archive, payload in lyric_archives.items():
+            if not archive.exists():
+                with archive.open("x", encoding="utf-8", newline="") as handle:
+                    published_archives.append(archive)
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+
+        if _stream_signature(flac_path) != before_stream:
+            raise RuntimeError("audio STREAMINFO identity changed after replacement")
         if load_config().preservation.provenance_ledger:
             _append_provenance_record(ledger, record)
+        if commit_journal is not None:
+            album_transaction.finish_commit(flac_path.parent, commit_journal)
+            commit_durable = True
+            shutil.rmtree(commit_journal)
+            commit_journal = None
         return WriteReport(
             transaction_id, decisions, str(ledger) if load_config().preservation.provenance_ledger else ""
         )
     except BaseException as exc:
+        if commit_durable:
+            retain_backup = True
+            raise RuntimeError(f"write committed, but recovery-tree cleanup failed; inspect {commit_journal}") from exc
+        if commit_journal is not None and (commit_journal / album_transaction.JOURNAL).is_file():
+            try:
+                album_transaction.reset_for_rollback(commit_journal)
+            except BaseException:
+                retain_backup = True
+                raise
         if replaced and backup_path is not None and backup_path.exists():
             try:
                 os.replace(backup_path, flac_path)
@@ -986,8 +1064,14 @@ def write_tags(
                 ) from exc
         for archive in published_archives:
             archive.unlink(missing_ok=True)
+        if commit_journal is not None:
+            if (commit_journal / album_transaction.JOURNAL).is_file():
+                album_transaction.recover_transaction(flac_path.parent, commit_journal)
+            else:
+                shutil.rmtree(commit_journal)
         raise
     finally:
+        commit_locks.close()
         if tmp_path.exists():
             tmp_path.unlink()
         if not retain_backup and backup_path is not None and backup_path.exists():
@@ -1065,7 +1149,7 @@ def main() -> int:
             # turn foreign multi-value comments into contradictory proposals.
             tags = []
 
-        write_tags(
+        report = write_tags(
             flac,
             tags,
             lyrics_file=args.lyrics_file,
@@ -1079,7 +1163,9 @@ def main() -> int:
             dry_run=args.dry_run,
         )
 
-        if not args.dry_run:
+        if args.dry_run:
+            print(json.dumps({"file": str(flac), "changes": report.changes}, ensure_ascii=False, sort_keys=True))
+        else:
             canonical_verify(flac, require_core=False)
     except (OSError, RuntimeError, ValueError) as exc:
         return die(str(exc))

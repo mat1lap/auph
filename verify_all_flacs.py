@@ -553,7 +553,7 @@ def main(argv: list[str] | None = None) -> int:
             Finding(
                 Severity.CRITICAL,
                 "transaction.abandoned",
-                "Abandoned metadata transaction; inspect or recover manually",
+                "Abandoned metadata transaction; use album_transaction.py for a journaled tree, or inspect legacy recovery files manually",
                 path,
             )
             for path in abandoned_transactions(root)

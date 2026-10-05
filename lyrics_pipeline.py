@@ -735,12 +735,14 @@ def materialize_selected(
             result.get("romajiLyrics"),
         ),
     }
+    if result.get("lyricsfile"):
+        representations["lyricsfile"] = (base.with_name(base.stem + ".lyricsfile.yaml"), result["lyricsfile"])
     raw_enhanced = str(result.get("enhancedLyrics") or "")
     if raw_enhanced and not validate_enhanced_lrc(raw_enhanced, duration=check_duration)[0]:
         representations["enhanced_raw"] = (base.with_name(base.stem + ".elrc.raw"), raw_enhanced)
         representations["enhanced"] = (base.with_name(base.stem + ".elrc"), None)
     raw_ttml = "" if is_alternate_text else str(result.get("ttmlLyrics") or "")
-    if raw_ttml and _valid_ttml(raw_ttml) and result.get("ttml_native"):
+    if raw_ttml and _valid_ttml(raw_ttml) and (result.get("ttml_native") or result.get("ttml_source_timing")):
         representations["ttml"] = (base.with_suffix(".ttml"), raw_ttml)
 
     # Preserve the provider representation separately from normalized display
@@ -770,7 +772,7 @@ def materialize_selected(
             continue
         # The archival provider sidecar is the exact extracted source string;
         # other representations cross the UTF-8/line-ending storage boundary.
-        if kind not in {"raw", "enhanced_raw"}:
+        if kind not in {"raw", "enhanced_raw", "lyricsfile"}:
             text = conservative_text(text)
         if kind == "enhanced" and not validate_enhanced_lrc(text, duration=check_duration)[0]:
             continue

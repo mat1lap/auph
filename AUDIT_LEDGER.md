@@ -1,5 +1,8 @@
 # Independent repository audit ledger
 
+Current follow-up: [IMPLEMENTATION_BACKLOG.md](IMPLEMENTATION_BACKLOG.md) records the
+2026-10-05 implementation and verification; older findings/counts below are historical.
+
 This ledger records observed behavior in this checkout. It is a working record, not a claim that unexamined paths are safe. The final report will distinguish verified behavior from remaining uncertainty.
 
 ## Baseline, 2026-09-26
