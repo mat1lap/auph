@@ -403,3 +403,11 @@ Independent verification of `663992b` and its follow-up fixes are recorded in
 Standalone lyric tag archives now publish complete bytes exclusively. Album
 ledger locks cover the journal snapshot through commit, and instrumental native
 YAML/raw sources are archived with their provider identity instead of discarded.
+
+Real-world validation on isolated album copies is recorded in
+[REAL_WORLD_VALIDATION.md](REAL_WORLD_VALIDATION.md). Partial albums carry
+AcoustID and duration evidence by disc/track position; they can identify a
+supported edition without becoming complete albums. Medium track totals come
+from release positions rather than the number of files currently present.
+The tested real sample contains only partial single-disc albums; live complete
+and multi-disc operation and personal player compatibility remain unverified.

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -30,10 +31,32 @@ def release_disc_counts(media: Iterable[dict[str, Any]]) -> dict[int, int]:
     return counts
 
 
+def discogs_disc_counts(tracklist: Iterable[dict[str, Any]]) -> dict[int, int]:
+    """Use contiguous explicit release positions; headings are not tracks."""
+    positions: dict[int, set[int]] = {}
+    for track in tracklist:
+        if track.get("type_", track.get("type", "track")) != "track":
+            continue
+        value = str(track.get("position") or "").strip()
+        match = re.fullmatch(r"(?:CD)?(\d+)[.-](\d+)", value, re.IGNORECASE)
+        if match:
+            disc, number = map(int, match.groups())
+        elif value.isdecimal():
+            disc, number = 1, int(value)
+        else:
+            return {}
+        existing = positions.setdefault(disc, set())
+        if disc < 1 or number < 1 or number in existing:
+            return {}
+        existing.add(number)
+    return {disc: len(numbers) for disc, numbers in positions.items() if numbers == set(range(1, max(numbers) + 1))}
+
+
 def assess_medium_layouts(
     local_disc_counts: dict[int, int],
     media: Iterable[dict[str, Any]],
     local_disc_durations: dict[int, tuple[float, ...]] | None = None,
+    local_track_durations: dict[tuple[int, int], float] | None = None,
 ) -> dict[str, Any]:
     """Validate every present local medium against a candidate release.
 
@@ -42,15 +65,51 @@ def assess_medium_layouts(
     """
     media = list(media)
     candidate = release_disc_counts(media)
-    present = sorted(local_disc_counts)
     conflicts: list[str] = []
     for disc, count in sorted(local_disc_counts.items()):
         expected = candidate.get(disc)
         if expected is None:
             conflicts.append(f"candidate lacks local disc {disc}")
-        elif expected != count:
+        elif expected != count and not (
+            count < expected
+            and local_track_durations
+            and len([key for key in local_track_durations if key[0] == disc]) == count
+        ):
             conflicts.append(f"disc {disc} track count {count}!={expected}")
-    if local_disc_durations:
+    positioned_layout = bool(local_track_durations) and (
+        local_disc_counts != candidate
+        or (
+            any(medium.get("tracks") for medium in media)
+            and all(track.get("position") for medium in media for track in medium.get("tracks") or [])
+        )
+    )
+    if positioned_layout and local_track_durations:
+        for disc, count in local_disc_counts.items():
+            if sum(key[0] == disc for key in local_track_durations) != count:
+                conflicts.append(f"disc {disc} missing or duplicate local track positions")
+        remote_positions: dict[tuple[int, int], float] = {}
+        for medium in media:
+            for track in medium.get("tracks") or []:
+                try:
+                    key = (int(medium.get("position") or 0), int(track.get("position") or 0))
+                    duration = float(track.get("length") or (track.get("recording") or {}).get("length") or 0) / 1000
+                except (TypeError, ValueError, OverflowError):
+                    conflicts.append("invalid positioned track duration")
+                    continue
+                if min(key) < 1 or key in remote_positions or not math.isfinite(duration) or duration < 0:
+                    conflicts.append("invalid or duplicate candidate track position/duration")
+                    continue
+                remote_positions[key] = duration
+        for key, local_duration in local_track_durations.items():
+            if key not in remote_positions:
+                conflicts.append(f"candidate lacks local track {key[0]}/{key[1]}")
+            elif not math.isfinite(local_duration) or local_duration < 0:
+                conflicts.append(f"invalid local duration {key[0]}/{key[1]}")
+            elif remote_positions[key] and abs(local_duration - remote_positions[key]) > max(
+                8.0, local_duration * 0.06
+            ):
+                conflicts.append(f"disc {key[0]} track {key[1]} duration layout conflict")
+    elif local_disc_durations:
         for medium in media:
             try:
                 position = int(medium.get("position") or 0)
@@ -74,7 +133,7 @@ def assess_medium_layouts(
                 continue
             if all(remote) and any(abs(left - right) > max(8.0, left * 0.06) for left, right in zip(local, remote)):
                 conflicts.append(f"disc {position} duration layout conflict")
-    complete = bool(candidate) and set(present) == set(candidate) and not conflicts
+    complete = bool(candidate) and local_disc_counts == candidate and not conflicts
     return {
         "compatible": not conflicts,
         "complete": complete,

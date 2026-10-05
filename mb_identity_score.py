@@ -192,6 +192,7 @@ def evaluate_identity(
     toc: dict | None = None,
     url_relation: bool = False,
     acoustid_recordings: dict[int, set[str]] | None = None,
+    acoustid_position_recordings: dict[tuple[int, int], set[str]] | None = None,
 ) -> dict:
     """Evaluate and score a candidate MusicBrainz release against Discogs, TOC, and AcoustID data."""
     # --- Discogs side extraction ---
@@ -483,12 +484,28 @@ def evaluate_identity(
     flags["acoustid_audio_mismatch"] = False
     flags["acoustid_match_count"] = 0
 
-    if acoustid_recordings and mrecordings:
+    if acoustid_position_recordings or (acoustid_recordings and mrecordings):
         matched_rec = 0
         checked_rec = 0
         mismatched_rec = 0
-        for idx, rec_id in enumerate(mrecordings):
-            acoust_cand = acoustid_recordings.get(idx)
+        mapped: list[tuple[str, set[str]]] = []
+        if acoustid_position_recordings:
+            remote_positions: dict[tuple[int, int], str] = {}
+            for medium in media:
+                for track in medium.get("tracks") or []:
+                    try:
+                        position = (int(medium.get("position") or 0), int(track.get("position") or 0))
+                    except (TypeError, ValueError):
+                        continue
+                    if min(position) > 0:
+                        remote_positions[position] = str((track.get("recording") or {}).get("id") or "")
+            mapped = [
+                (remote_positions.get(position, ""), ids) for position, ids in acoustid_position_recordings.items()
+            ]
+        elif acoustid_recordings:
+            # Legacy API accepts indices into the selected medium only.
+            mapped = [(rec_id, acoustid_recordings.get(idx, set())) for idx, rec_id in enumerate(mrecordings)]
+        for rec_id, acoust_cand in mapped:
             if acoust_cand:
                 checked_rec += 1
                 if rec_id and rec_id in acoust_cand:

@@ -2697,25 +2697,14 @@ def process_single_track(
                     disc_tracktotal = str(med["track-count"])
                 break
     else:
-        # Check actual FLAC files on this disc in folder
-        local_disc_flacs = [
-            fl for fl in album_tags.get("flac_files", []) if re.match(rf"^0?{disc_val}[-_.][0-9]+", fl.name)
-        ]
-        if local_disc_flacs:
-            disc_tracktotal = str(len(local_disc_flacs))
-        elif discogs_json:
-            disc_positions = [
-                t.get("position", "").strip()
-                for t in discogs_json.get("tracklist", [])
-                if (t.get("type_", t.get("type", "track")) == "track")
-            ]
-            this_disc_tracks = [
-                pos
-                for pos in disc_positions
-                if pos.startswith((f"{disc_val}-", f"{disc_val}.", f"CD{disc_val}-", f"CD{disc_val}."))
-            ]
-            if this_disc_tracks:
-                disc_tracktotal = str(len(this_disc_tracks))
+        # A partial folder count is not the medium's track total. Prefer the
+        # fetched release list, with physical CUE/TOC evidence as a single-disc
+        # fallback, rather than counting the files currently present.
+        release_counts = release_match.discogs_disc_counts((discogs_json or {}).get("tracklist") or [])
+        if int(disc_val) in release_counts:
+            disc_tracktotal = str(release_counts[int(disc_val)])
+        elif int(album_tags.get("total_discs") or 1) == 1 and album_tags.get("resolved_tracktotal"):
+            disc_tracktotal = str(album_tags["resolved_tracktotal"])
 
     # DISCSUBTITLE for multi-disc releases and box sets
     disc_sub = album_tags.get("disc_subtitles", {}).get(disc_val, "")
@@ -2971,7 +2960,7 @@ def process_single_track(
     embed_dim = album_tags.get("embed_max_dim", 1400)
     if is_verbose:
         print(
-            f"[VERBOSE][METADATA] Writing {len(manifest_tags)} Vorbis comments to '{f.name}' (Artwork: {'Yes' if picture_file else 'No'})..."
+            f"[VERBOSE][METADATA] {'Planning' if dry_run else 'Writing'} {len(manifest_tags)} Vorbis comments to '{f.name}' (Artwork: {'Yes' if picture_file else 'No'})..."
         )
     release_confidence = (
         metadata_writer.Confidence.VERIFIED
@@ -4036,15 +4025,17 @@ def process_album(
                                 candidate_entries.append((cid, False, False))
 
     # Tier 6.5: AcoustID Audio Fingerprint Match & Candidate Discovery
-    acoustid_track_recordings: dict[int, set[str]] = {}
+    acoustid_track_recordings: dict[tuple[int, int], set[str]] = {}
     if flac_files:
         acoust_release_votes: dict[str, int] = {}
         # Fingerprints identify recordings, not editions.  Evaluate every track
         # so one erroneous first-track result cannot steer release selection.
-        for track_index, flac_path in enumerate(flac_files):
+        for flac_path in flac_files:
             acoust_rel_ids, acoust_rec_ids = query_acoustid_candidates(flac_path, session, cache_dir_mb)
-            if acoust_rec_ids:
-                acoustid_track_recordings[track_index] = acoust_rec_ids
+            audio_tags = {str(key).upper(): list(values) for key, values in FLAC(flac_path).items()}
+            disc, track, _title, conflicts = library_layout.position_evidence(flac_path, folder, audio_tags)
+            if acoust_rec_ids and disc is not None and track is not None and not conflicts:
+                acoustid_track_recordings.setdefault((disc, track), set()).update(acoust_rec_ids)
             for acoust_release_id in acoust_rel_ids:
                 acoust_release_votes[acoust_release_id] = acoust_release_votes.get(acoust_release_id, 0) + 1
         if len(candidate_entries) < candidate_limit:
@@ -4057,13 +4048,17 @@ def process_album(
     evaluated_candidates: list[dict[str, Any]] = []
     local_disc_counts = library_layout.disc_counts(flac_files, folder)
     local_disc_durations: dict[int, list[float]] = {}
+    local_track_durations: dict[tuple[int, int], float] = {}
     for local_file in flac_files:
         try:
             local_audio = FLAC(local_file)
             local_tags = {str(key).upper(): list(values) for key, values in local_audio.items()}
-            disc_number, _track, _title, conflicts = library_layout.position_evidence(local_file, folder, local_tags)
-            if disc_number is not None and not conflicts:
+            disc_number, track_number, _title, conflicts = library_layout.position_evidence(
+                local_file, folder, local_tags
+            )
+            if disc_number is not None and track_number is not None and not conflicts:
                 local_disc_durations.setdefault(disc_number, []).append(float(local_audio.info.length))
+                local_track_durations[(disc_number, track_number)] = float(local_audio.info.length)
         except Exception:
             pass
 
@@ -4088,12 +4083,13 @@ def process_album(
                 discid_exact=c_discid,
                 toc=mb_toc,
                 url_relation=c_url,
-                acoustid_recordings=acoustid_track_recordings,
+                acoustid_position_recordings=acoustid_track_recordings,
             )
             medium_layout = release_match.assess_medium_layouts(
                 local_disc_counts,
                 cand_json.get("media") or [],
                 {disc: tuple(values) for disc, values in local_disc_durations.items()},
+                local_track_durations,
             )
             verify["medium_layout"] = medium_layout
             if not medium_layout["compatible"]:
@@ -4438,7 +4434,7 @@ def process_album(
     generated_dr_reports: list[str] = []
     if no_dr14 or dry_run:
         if not quiet:
-            print("  -> DR14: пропущено для тестов (--no-dr14).")
+            print(f"  -> DR14: skipped ({'--dry-run' if dry_run else '--no-dr14'}).")
     else:
         existing_rep = dr14_parse.find_report_in_dir(folder)
         if existing_rep:
@@ -4733,7 +4729,8 @@ def process_album(
     # ReplayGain 2.0 (loudgain)
     if no_loudgain or not load_config().loudness.enabled:
         if not quiet:
-            print("  -> REPLAYGAIN: пропущено для тестов (--no-loudgain).")
+            reason = "--no-loudgain" if no_loudgain else "policy loudness.enabled=false"
+            print(f"  -> REPLAYGAIN: skipped ({reason}).")
     else:
         loudness_outcome: dict[str, str] = {}
         loudness_written = run_loudgain(

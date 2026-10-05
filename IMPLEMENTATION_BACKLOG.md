@@ -521,3 +521,41 @@ analytic vectors assert specific measured peak/RMS behavior independently.
 Agreement with a proprietary meter still requires separately supplied reference
 vectors/tools, as already stated in W15/R07. No new performance benchmark was
 claimed during this verification.
+
+## Real-world copy validation — 2026-10-05
+
+See REAL_WORLD_VALIDATION.md and `/home/emvis/flac-validation-20261005/reports/`.
+The located real collection contains only partial single-disc albums. Tested
+Innuendo (5 tracks), Made in Heaven (3), and Japanese News of the World (2),
+using full independent copies outside the collection. All original sample files
+and decoded audio remain unchanged. Dry-run, automatic, repeated, PTY default
+artwork and external-boundary fallback paths were exercised. Accepted corrected
+editions remain INCOMPLETE; grouping is not forced to COMPLETE.
+
+| Reference | Trigger / root cause | Implementation and evidence | Status |
+|---|---|---|---|
+| RW01 / release/recording position evidence | Sorted file index was used as AcoustID release-track position; missing songs and disc resets created false hard conflicts. | Map explicit disc/track evidence into all candidate media; legacy selected-medium index API remains supported. Real Innuendo now matches all 5 recordings, rather than 1; production regression verifies final recording/release-track namespaces and wrong-disc recording rejection. | fixed and verified |
+| RW02 / R18 partial albums | Full count equality rejected a supported partial subset as a different medium. | Permit only explicit, range-valid, duration-compatible subset positions; reject incomplete evidence/conflicting durations and retain complete=False. Real Innuendo/Made edition selections recovered; both remain INCOMPLETE. | fixed and verified |
+| RW03 / numbering | Resolved release count was overwritten by present FLAC count; dry-run proposed 5/3/2 totals instead of 12/13/11. | Use fetched per-medium/explicit release positions before single-disc resolved evidence. Actual dry-run integration reproduces old proposal and verifies correction. | fixed and verified |
+| RW04 / R10 diagnostics | Dry-run announced writing and incorrectly attributed DR14 skip to --no-dr14. | Report planning and actual --dry-run reason. Real corrected CLI dry-run and focused production regression pass without album changes. | fixed and verified |
+| R11 live services | Previously no authenticated live evidence. | Credentialed Discogs and public MusicBrainz/LRCLIB checked live; NetEase/QQ and several text providers produced candidates. Spotify/Deezer auth, Yandex/VK/Metal-Archives blocking, TLS/parser/rate-limit failures remain distinctly reported; matrix in validation report. | blocked for remaining routes; partially live verified |
+| D: SYNCEDLYRICS | Personal player compatibility is still not established. | Installed mpv renders embedded artwork and IPC parses an external LRC cue at its real time; no GUI/plain/embedded-lyrics assertion. IPC controlled quit exits 4, not a successful normal playback claim. | blocked for remaining interoperability checks |
+| R18 complete/multi-disc live coverage | No such actual albums were located; query for another path unanswered. | Synthetic positioned multi-disc/conflict regressions pass, but these do not replace real complete/multi-disc runs. | blocked by missing representative input |
+
+Added `test_real_world_regressions.py`: 6 cases. Corrected initial test-call/schema
+mistakes before recording reproductions; two integration cases and the diagnostic
+case failed before their fixes. Final full suite: **645 passed in 110.31s**;
+Ruff lint/format (48 files), mypy (40 source files), pip check and diff check pass.
+Independent inspection uses metaflac, ffprobe, Pillow and ffmpeg decoded PCM.
+Controlled image HTTP failure and materialization/file-open injection delegate
+real selection/commit behavior; invalid initial HTTP doubles were separated and
+corrected before claiming fallback evidence. Original credentials/configuration
+are not modified, and reports contain lyric counts/hashes rather than full text.
+No whole-project or physical power-loss guarantee is added.
+
+A separate fresh News copy without existing ReplayGain tags exercised real
+`/usr/bin/loudgain -r -k -s e`: exit 0, track gains −4.12/−2.33 dB and finite
+peaks, no album gain fields, decoded PCM unchanged. Existing valid measurements
+were preserved in the other scenarios; successful cleanup is not substituted
+for a scanner run. Personal GUI/embedded lyric display and real complete/multi-disc
+inputs remain missing; actual terminal Kitty rendering was not observed.
