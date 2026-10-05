@@ -121,7 +121,7 @@ scope for this lyrics implementation.
 - [x] Cache identity includes provider, adapter, title/artist/album/version,
   duration, stable IDs, and language; parser/schema version invalidates stale
   serialized responses.
-- [x] `provider_cache.PARSER_VERSION` is `2026-10-05-lyrics-v10` (current follow-up).
+- [x] `provider_cache.PARSER_VERSION` is `2026-10-05-lyrics-v11` (current follow-up).
 - [x] Content-addressed sidecars prevent collisions and preserve curated files;
   conversion manifests now include schema and parser versions, evidence,
   transformations, and artifact hashes.

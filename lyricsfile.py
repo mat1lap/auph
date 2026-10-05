@@ -107,13 +107,22 @@ def parse_lyricsfile(source: str, *, title: str, artist: str, duration: float | 
     if not isinstance(plain, str):
         raise TypeError("Lyricsfile plain text is not a string")
     lines = data.get("lines", [])
-    if not isinstance(lines, list) or len(lines) > 10_000:
-        raise ValueError("invalid Lyricsfile lines")
-    if not all(isinstance(line, dict) and isinstance(line.get("text"), str) for line in lines):
-        raise ValueError("invalid Lyricsfile line text")
+    if (
+        not isinstance(lines, list)
+        or len(lines) > 10_000
+        or not all(isinstance(line, dict) and isinstance(line.get("text"), str) for line in lines)
+    ):
+        if plain and metadata.get("instrumental") is not True:
+            return {
+                "plainLyrics": plain,
+                "language": metadata.get("language", ""),
+                "warnings": ["invalid Lyricsfile line structure; independent plain form retained"],
+            }
+        raise ValueError("invalid Lyricsfile lines without usable independent plain text")
     result: dict[str, Any] = {
         "plainLyrics": plain or "\n".join(line["text"] for line in lines),
         "language": metadata.get("language", ""),
+        "instrumental": metadata.get("instrumental"),
     }
     warnings: list[str] = []
     if metadata.get("instrumental") is True and result["plainLyrics"]:

@@ -34,7 +34,7 @@ class JsonSession(Protocol):
 
 
 SCHEMA_VERSION = 2
-PARSER_VERSION = "2026-10-05-lyrics-v10"
+PARSER_VERSION = "2026-10-05-lyrics-v11"
 
 
 def redact_secrets(message: str) -> str:
@@ -293,8 +293,12 @@ def fetch_json(
                 request_kwargs["stream"] = True
             response = get(url, **request_kwargs)
             last_status = int(response.status_code)
+            response_headers = getattr(response, "headers", {}) or {}
+            vary = {
+                name.strip().casefold() for name in str(response_headers.get("Vary", "")).split(",") if name.strip()
+            }
+            cacheable = vary <= {"authorization", "cookie", "accept-language", "accept-encoding"}
             if last_status == 200:
-                response_headers = getattr(response, "headers", {}) or {}
                 content_length = response_headers.get("Content-Length")
                 try:
                     if content_length is not None and int(content_length) > maximum_response_bytes:
@@ -329,14 +333,9 @@ def fetch_json(
                             failure_classification=error_envelope_classification(payload),
                         )
                     if isinstance(payload, (dict, list)):
-                        vary = {
-                            name.strip().casefold()
-                            for name in str(response_headers.get("Vary", "")).split(",")
-                            if name.strip()
-                        }
                         # Unknown representation dimensions cannot safely share
                         # the current key. Return the data but do not persist it.
-                        if vary <= {"authorization", "cookie", "accept-language", "accept-encoding"}:
+                        if cacheable:
                             try:
                                 cache.store(cache_key, payload, status=204 if payload == [] else 200)
                             except OSError:
@@ -349,10 +348,11 @@ def fetch_json(
                         error=f"unexpected JSON type {type(payload).__name__}",
                     )
             elif last_status == 404:
-                try:
-                    cache.store(cache_key, None, status=404)
-                except OSError:
-                    pass
+                if cacheable:
+                    try:
+                        cache.store(cache_key, None, status=404)
+                    except OSError:
+                        pass
                 return ProviderResult(404, None, attempt, error="not found")
             elif last_status in retryable:
                 last_error = f"HTTP {last_status}"

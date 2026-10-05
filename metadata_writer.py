@@ -862,6 +862,7 @@ def write_tags(
     commit_durable = False
     commit_locks = ExitStack()
     lyric_archives: dict[Path, str] = {}
+    staged_archives: dict[Path, Path] = {}
     published_archives: list[Path] = []
     try:
         shutil.copy2(flac_path, tmp_path)
@@ -1007,6 +1008,7 @@ def write_tags(
                 if not archive.exists():
                     staged_archive = commit_journal / f"archive-{index}"
                     staged_archive.write_bytes(payload.encode("utf-8"))
+                    staged_archives[archive] = staged_archive
                     outputs.append((staged_archive, archive))
             if load_config().preservation.provenance_ledger:
                 if ledger.is_symlink():
@@ -1026,11 +1028,24 @@ def write_tags(
         os.replace(tmp_path, flac_path)
         for archive, payload in lyric_archives.items():
             if not archive.exists():
-                with archive.open("x", encoding="utf-8", newline="") as handle:
-                    published_archives.append(archive)
-                    handle.write(payload)
-                    handle.flush()
-                    os.fsync(handle.fileno())
+                archive_source = staged_archives.get(archive)
+                if archive_source is None:
+                    archive_fd, archive_name = tempfile.mkstemp(prefix=".lyric-archive-", dir=archive.parent)
+                    archive_source = Path(archive_name)
+                    staged_archives[archive] = archive_source
+                    with os.fdopen(archive_fd, "wb") as handle:
+                        handle.write(payload.encode("utf-8"))
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                # Publish complete bytes exclusively. An interruption after
+                # link creation still records our own inode for rollback.
+                try:
+                    os.link(archive_source, archive, follow_symlinks=False)
+                except BaseException:
+                    if archive.exists() and not archive.is_symlink() and os.path.samefile(archive_source, archive):
+                        published_archives.append(archive)
+                    raise
+                published_archives.append(archive)
 
         if _stream_signature(flac_path) != before_stream:
             raise RuntimeError("audio STREAMINFO identity changed after replacement")
@@ -1072,6 +1087,8 @@ def write_tags(
         raise
     finally:
         commit_locks.close()
+        for staged_archive in staged_archives.values():
+            staged_archive.unlink(missing_ok=True)
         if tmp_path.exists():
             tmp_path.unlink()
         if not retain_backup and backup_path is not None and backup_path.exists():

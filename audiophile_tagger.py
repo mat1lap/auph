@@ -28,6 +28,7 @@ import time
 import urllib.parse
 import uuid
 from collections.abc import Callable, Mapping
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -2386,6 +2387,14 @@ def process_single_track(
                 lyrics_status = "INSTRUMENTAL"
                 lyrics_has_word_sync = False
                 lyrics_has_bg_vocals = False
+                if evidence:
+                    selected_payload = dict(evidence)
+                    if not dry_run:
+                        lyrics_paths = lyrics_pipeline.archive_instrumental_evidence(
+                            write_target or f,
+                            evidence,
+                            existing_base=f,
+                        )
             else:
                 lyrics_status = f"PRESERVED_{lookup_status}" if lyrics_resolution else lookup_status
 
@@ -2992,6 +3001,7 @@ def process_single_track(
             "lyrics": {
                 "source": lyrics_source,
                 "status": lyrics_status,
+                "provider_track_id": str(selected_payload.get("provider_track_id") or selected_payload.get("id") or ""),
                 "raw_sha256": hashlib.sha256(raw_lyrics.encode("utf-8")).hexdigest() if raw_lyrics else "",
                 "outputs": {
                     name: hashlib.sha256(path.read_bytes()).hexdigest()
@@ -4781,7 +4791,11 @@ def process_album(
         committed_sidecars: list[Path] = []
         cover_was_replaced = False
         cover_backup = backup_root / "cover.jpg"
+        commit_locks = ExitStack()
         try:
+            # The merged ledger used by the journal must be the exact ledger
+            # eventually published. Other cooperating albums may share it.
+            commit_locks.enter_context(metadata_writer.file_lock(folder / ".metadata-provenance.jsonl"))
             outputs = [(pending_files[original], original) for original in flac_files]
             for sidecar in sorted(pending_root.rglob("*")):
                 if sidecar.is_file() and sidecar.suffix.casefold() != ".flac":
@@ -4936,6 +4950,8 @@ def process_album(
             if not isinstance(exc, Exception):
                 raise
             return False
+        finally:
+            commit_locks.close()
         print("  -> POST-VERIFY: core tags, DR14, and duplicate guards passed.")
         discard_transaction()
         discard_cover_staging()

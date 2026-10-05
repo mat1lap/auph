@@ -17,6 +17,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from library_layout import DISC_DIR_RE
+from process_lock import writer_album_root
+
 JOURNAL = "commit-journal.json"
 
 
@@ -110,8 +113,16 @@ def load_journal(transaction: Path) -> dict[str, Any]:
     path = checked_path(transaction, JOURNAL)
     if path.stat().st_size > 10_000_000:
         raise ValueError("recovery journal exceeds safety limit")
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict) or data.get("schema") != 1 or data.get("state") not in {"prepared", "committed"}:
+    with path.open("rb") as handle:
+        raw = handle.read(10_000_001)
+    if len(raw) > 10_000_000:
+        raise ValueError("recovery journal exceeds safety limit")
+    data = json.loads(raw)
+    if (
+        not isinstance(data, dict)
+        or data.get("schema") != 1
+        or data.get("state") not in {"prepared", "committed", "rolled_back"}
+    ):
         raise ValueError("unsupported recovery journal")
     if not isinstance(data.get("entries"), list) or not data["entries"]:
         raise ValueError("empty or invalid recovery journal")
@@ -146,7 +157,14 @@ def reset_for_rollback(transaction: Path) -> None:
 
 
 def unfinished_transactions(folder: Path) -> list[Path]:
-    return sorted(path for path in folder.glob(".metadata-transaction-*") if (path / JOURNAL).exists())
+    roots = [folder]
+    if folder.is_dir():
+        roots.extend(
+            path
+            for path in folder.iterdir()
+            if DISC_DIR_RE.match(path.name) and path.is_dir() and not path.is_symlink()
+        )
+    return sorted(path for root in roots for path in root.glob(".metadata-transaction-*") if (path / JOURNAL).exists())
 
 
 def recover_transaction(folder: Path, transaction: Path, *, dry_run: bool = False) -> list[str]:
@@ -174,10 +192,12 @@ def recover_transaction(folder: Path, transaction: Path, *, dry_run: bool = Fals
         if Path(entry["path"]).parts[0].startswith(".metadata-transaction-"):
             raise ValueError("recovery target is a transaction directory")
         backup = checked_path(transaction, entry["backup"]) if isinstance(entry.get("backup"), str) else None
-        if before is not None and (backup is None or digest(backup) != before):
+        if data["state"] == "prepared" and before is not None and (backup is None or digest(backup) != before):
             raise ValueError(f"missing or damaged recovery snapshot: {entry['path']}")
         current = digest(target)
-        allowed = {after} if data["state"] == "committed" else {before, after}
+        allowed = (
+            {after} if data["state"] == "committed" else {before} if data["state"] == "rolled_back" else {before, after}
+        )
         if current not in allowed:
             raise ValueError(f"unrelated edit prevents recovery: {entry['path']}")
         validated.append((target, backup, before, current))
@@ -205,6 +225,18 @@ def recover_transaction(folder: Path, transaction: Path, *, dry_run: bool = Fals
                 finally:
                     Path(name).unlink(missing_ok=True)
             fsync_directory(target.parent)
+        # A later cleanup interruption must not require snapshots already
+        # deleted by cleanup. Sync restored contents and the terminal state
+        # before removing any recovery data; repeated recovery only cleans up.
+        for target, _backup, before, _current in validated:
+            if digest(target) != before:
+                raise ValueError(f"restored output differs from journal: {target.name}")
+            if before is not None:
+                with target.open("rb") as handle:
+                    os.fsync(handle.fileno())
+            fsync_directory(target.parent)
+        data["state"] = "rolled_back"
+        write_journal(transaction, data)
     shutil.rmtree(transaction)
     fsync_directory(folder)
     return actions
@@ -222,11 +254,12 @@ def main(argv: list[str] | None = None) -> int:
     descriptor: int | None = None
     try:
         folder = args.album.resolve(strict=True)
-        descriptor = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+        lock_root = writer_album_root(folder / ".recovery-target.flac")
+        descriptor = os.open(lock_root, os.O_RDONLY | os.O_DIRECTORY)
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         transactions = unfinished_transactions(folder)
         for transaction in transactions:
-            for action in recover_transaction(folder, transaction, dry_run=args.dry_run):
+            for action in recover_transaction(transaction.parent, transaction, dry_run=args.dry_run):
                 print(f"{transaction.name}: {action}")
         if not transactions:
             print("No journaled transactions found. Legacy recovery trees require manual inspection.")

@@ -24,6 +24,21 @@ from library_layout import DISC_DIR_RE
 P = ParamSpec("P")
 T = TypeVar("T")
 _HELD_LOCKS = threading.local()
+_LOCK_DESCRIPTORS: set[int] = set()
+
+
+def _after_fork() -> None:
+    global _HELD_LOCKS
+    # flock ownership belongs to the inherited open-file description, while
+    # reentrancy belongs to a thread in this process. The child owns neither
+    # the parent's reentrancy nor its lock lifetime.
+    for descriptor in _LOCK_DESCRIPTORS:
+        os.close(descriptor)
+    _LOCK_DESCRIPTORS.clear()
+    _HELD_LOCKS = threading.local()
+
+
+os.register_at_fork(after_in_child=_after_fork)
 
 
 def lock_directory() -> Path:
@@ -47,12 +62,14 @@ def file_lock(path: Path) -> Iterator[None]:
         yield
         return
     descriptor = os.open(directory / key, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    _LOCK_DESCRIPTORS.add(descriptor)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         held.add(key)
         yield
     finally:
         held.discard(key)
+        _LOCK_DESCRIPTORS.discard(descriptor)
         os.close(descriptor)
 
 
@@ -75,11 +92,13 @@ def serialize_file_writer(function: Callable[P, T]) -> Callable[P, T]:
                 return function(*args, **kwargs)
         parent = writer_album_root(path)
         descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+        _LOCK_DESCRIPTORS.add(descriptor)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             with file_lock(path):
                 return function(*args, **kwargs)
         finally:
+            _LOCK_DESCRIPTORS.discard(descriptor)
             os.close(descriptor)
 
     return locked

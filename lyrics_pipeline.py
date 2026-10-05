@@ -690,6 +690,31 @@ def materialize_embedded(
     return outputs
 
 
+def archive_instrumental_evidence(base: Path, evidence: Mapping[str, Any], *, existing_base: Path) -> dict[str, Path]:
+    """Keep matched no-vocals evidence without manufacturing a lyric candidate."""
+    outputs: dict[str, Path] = {}
+    for kind, suffix, text in (
+        ("lyricsfile", ".lyricsfile.yaml", str(evidence.get("lyricsfile") or "")),
+        ("raw", ".provider.raw.json", str(evidence.get("providerRaw") or "")),
+    ):
+        if not text:
+            continue
+        limit = MAX_LYRICS_CHARS if kind == "lyricsfile" else MAX_PROVIDER_RAW_CHARS
+        if len(text) > limit:
+            raise ValueError("instrumental source exceeds archival safety limit")
+        wanted = base.with_name(base.stem + suffix)
+        destination = _safe_path(
+            wanted,
+            str(evidence.get("source") or "provider"),
+            text,
+            existing_path=existing_base.parent / wanted.name,
+        )
+        if not destination.exists():
+            destination.write_text(text, encoding="utf-8", newline="")
+        outputs[kind] = destination
+    return outputs
+
+
 def materialize_selected(
     base: Path, assessment: LyricsAssessment, *, existing_base: Path | None = None
 ) -> LyricsResolution:

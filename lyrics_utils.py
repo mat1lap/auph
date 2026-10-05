@@ -46,7 +46,15 @@ from lyrics_quality import (
     version_signature,
 )
 from lyricsfile import parse_lyricsfile
-from provider_cache import IntervalRateLimiter, JsonCache, ProviderResult, fetch_json, redact_secrets, retry_delay
+from provider_cache import (
+    IntervalRateLimiter,
+    JsonCache,
+    ProviderResult,
+    fetch_json,
+    redact_secrets,
+    retry_delay,
+    session_cache_key,
+)
 
 _LRCLIB_LOCK = threading.Lock()
 _LRCLIB_LAST_REQUEST = 0.0
@@ -2283,21 +2291,43 @@ def fetch_lrclib(
                         and "artistName" in item
                         and "duration" in item
                         and any(key in item for key in ("plainLyrics", "syncedLyrics", "instrumental", "lyricsfile"))
+                        and (
+                            item.get("instrumental") is None
+                            or isinstance(item.get("instrumental"), bool)
+                            or any(item.get(key) for key in ("plainLyrics", "syncedLyrics", "lyricsfile"))
+                        )
                     )
                 elif expected_type is list and isinstance(result.payload, list):
-                    schema_ok = all(
-                        isinstance(item, dict) and "trackName" in item and "artistName" in item
+                    valid_items = [
+                        item
                         for item in result.payload
-                    )
+                        if isinstance(item, dict)
+                        and isinstance(item.get("trackName"), str)
+                        and isinstance(item.get("artistName"), str)
+                        and (
+                            item.get("instrumental") is None
+                            or isinstance(item.get("instrumental"), bool)
+                            or any(item.get(key) for key in ("plainLyrics", "syncedLyrics", "lyricsfile"))
+                        )
+                    ]
+                    if len(valid_items) != len(result.payload):
+                        _LRCLIB_CACHE.delete(session_cache_key(session, url, headers))
+                        failures.append(
+                            ProviderResult(200, None, result.attempts, error="malformed LRCLIB search items")
+                        )
+                        if not valid_items:
+                            return None
+                    successful_responses += 1
+                    return valid_items
                 if not schema_ok:
-                    _LRCLIB_CACHE.delete(url)
+                    _LRCLIB_CACHE.delete(session_cache_key(session, url, headers))
                     failures.append(
                         ProviderResult(200, None, result.attempts, error="unexpected LRCLIB response schema")
                     )
                     return None
                 successful_responses += 1
                 return result.payload
-            _LRCLIB_CACHE.delete(url)
+            _LRCLIB_CACHE.delete(session_cache_key(session, url, headers))
             failures.append(
                 ProviderResult(
                     200, None, result.attempts, error=f"unexpected LRCLIB schema (wanted {expected_type.__name__})"
@@ -2324,7 +2354,7 @@ def fetch_lrclib(
             except (ValueError, TypeError) as exc:
                 rich_forms = {"validationWarnings": [f"Lyricsfile rejected: {exc}"]}
                 failures.append(ProviderResult(200, None, 1, error="invalid LRCLIB Lyricsfile"))
-        candidate = {
+        candidate: dict[str, Any] = {
             "source": source,
             "id": item.get("id"),
             "trackName": item.get("trackName") or "",
@@ -2333,7 +2363,7 @@ def fetch_lrclib(
             "duration": item.get("duration"),
             "isrc": item.get("isrc") or "",
             "language": item.get("language") or "",
-            "instrumental": bool(item.get("instrumental")),
+            "instrumental": item.get("instrumental") is True,
             "providerRaw": json.dumps(item, ensure_ascii=False, sort_keys=True),
             "lyricsfile": item.get("lyricsfile") or "",
             "recording_id": item.get("recording_id") or item.get("musicbrainz_recording_id") or "",
@@ -2352,6 +2382,12 @@ def fetch_lrclib(
                 candidate[field] = rich_forms[field]
         candidate["language"] = candidate["language"] or rich_forms.get("language", "")
         candidate["validationWarnings"] = rich_forms.get("validationWarnings", rich_forms.get("warnings", []))
+        if item.get("instrumental") is not None and not isinstance(item.get("instrumental"), bool):
+            candidate["validationWarnings"].append("invalid LRCLIB instrumental flag; independent lyric forms retained")
+        if rich_forms.get("plainLyrics") or rich_forms.get("syncedLyrics"):
+            if candidate["instrumental"]:
+                candidate["validationWarnings"].append("LRCLIB instrumental flag conflicts with native vocal text")
+            candidate["instrumental"] = False
         if rich_forms.get("plainLyrics") or rich_forms.get("syncedLyrics"):
             candidate["transformations"] = ["Lyricsfile 1.0 draft parsed; supplied millisecond timing retained"]
         return candidate
@@ -2369,11 +2405,29 @@ def fetch_lrclib(
 
     exact_url = f"https://lrclib.net/api/get?{urllib.parse.urlencode(params)}"
     exact = get_json(exact_url, dict)
-    if (
-        isinstance(exact, dict)
-        and bool(exact.get("instrumental"))
-        and not (exact.get("syncedLyrics") or exact.get("plainLyrics"))
-    ):
+    exact_instrumental = bool(isinstance(exact, dict) and exact.get("instrumental") is True)
+    native_exact: dict[str, Any] = {}
+    if isinstance(exact, dict) and exact.get("lyricsfile"):
+        try:
+            native_exact = parse_lyricsfile(
+                str(exact["lyricsfile"]),
+                title=str(exact.get("trackName") or ""),
+                artist=str(exact.get("artistName") or ""),
+                duration=duration,
+            )
+            if native_exact.get("plainLyrics") or native_exact.get("syncedLyrics"):
+                exact_instrumental = False
+            elif native_exact.get("instrumental") is True:
+                if exact.get("instrumental") is False:
+                    exact_instrumental = False
+                    failures.append(ProviderResult(200, None, 1, error="conflicting LRCLIB instrumental evidence"))
+                else:
+                    exact_instrumental = True
+        except (ValueError, TypeError):
+            # A malformed native form cannot certify no vocals; the ordinary
+            # candidate path can still retain independently supplied plain text.
+            exact_instrumental = False
+    if isinstance(exact, dict) and exact_instrumental and not (exact.get("syncedLyrics") or exact.get("plainLyrics")):
         exact_title = str(exact.get("trackName") or "")
         exact_artist = str(exact.get("artistName") or "")
         exact_album = str(exact.get("albumName") or "")
@@ -2412,6 +2466,8 @@ def fetch_lrclib(
                 "isrc": exact.get("isrc") or "",
                 "recording_id": exact_recording_id,
                 "language": exact.get("language") or "",
+                "lyricsfile": exact.get("lyricsfile") or "",
+                "providerRaw": json.dumps(exact, ensure_ascii=False, sort_keys=True),
                 "instrumental": True,
                 "instrumental_verified": True,
                 "identity_validated": True,
@@ -2502,6 +2558,12 @@ def fetch_lrclib(
         seen_candidates.add(identity_key)
         unique_candidates.append(candidate)
     if unique_candidates:
+        if failures:
+            for candidate in unique_candidates:
+                candidate["validationWarnings"] = [
+                    *candidate.get("validationWarnings", []),
+                    *(f"LRCLIB partial acquisition: {failure.classification}: {failure.error}" for failure in failures),
+                ]
         selected = dict(unique_candidates[0])
         selected["alternatives"] = unique_candidates[1:]
         return selected

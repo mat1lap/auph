@@ -358,7 +358,10 @@ recovery without writes, then restore an interrupted publication explicitly:
 Recovery preflights all destinations and backups. It refuses symlinks, path
 traversal, damaged snapshots and unrelated later edits, retaining recovery data
 for inspection. A fully committed journal cleans up without undoing the new
-metadata. Legacy trees and standalone ledgers outside the track directory
+metadata. Recovery records a durable rolled-back state before cleanup, so an
+interrupted cleanup can be retried even after snapshots have been removed.
+Root recovery includes normal direct CD/Disc subfolder journals and holds the
+same album-root lock used by standalone writers. Legacy trees and standalone ledgers outside the track directory
 remain manual-recovery cases. Unknown outside-journal temporary files are left
 for inspection. Multiple replacements are still observable individually.
 
@@ -369,9 +372,10 @@ but their thread safety is not certified. MusicBrainz/Discogs request spacing
 also coordinates across processes on this host. Private lock/rate state lives
 in the per-user temporary directory, outside the music collection.
 
-JSON parser/cache version is `2026-10-05-lyrics-v10`. Actual prepared session
+JSON parser/cache version is `2026-10-05-lyrics-v11`. Actual prepared session
 URL query parameters and credentials/cookies/language affect cache identity. Unknown server `Vary`
-dimensions disable persistence for that response. Explicit API error messages
+dimensions disable persistence for positive and negative responses. Parser v11
+invalidates v10 entries that could contain unsafe negatives. Explicit API error messages
 remain typed failures; parser/auth/rate failures do not become NOT_FOUND caches.
 
 LRCLIB Lyricsfile 1.0 draft YAML now contributes plain, line and supplied word
@@ -393,3 +397,9 @@ Dry-run emits old/proposed values and source/confidence, including review
 proposals that were not applied. It also reports picture inventories by hash.
 Collection contents remain unchanged; private cache/lock/temp activity is
 separate from collection writes.
+
+Independent verification of `663992b` and its follow-up fixes are recorded in
+[IMPLEMENTATION_BACKLOG.md](IMPLEMENTATION_BACKLOG.md#independent-verification-of-663992b--2026-10-05).
+Standalone lyric tag archives now publish complete bytes exclusively. Album
+ledger locks cover the journal snapshot through commit, and instrumental native
+YAML/raw sources are archived with their provider identity instead of discarded.
