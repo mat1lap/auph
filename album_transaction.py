@@ -14,11 +14,12 @@ import json
 import os
 import shutil
 import tempfile
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
 from library_layout import DISC_DIR_RE
-from process_lock import writer_album_root
+from process_lock import file_lock, writer_album_root
 
 JOURNAL = "commit-journal.json"
 
@@ -168,6 +169,25 @@ def unfinished_transactions(folder: Path) -> list[Path]:
 
 
 def recover_transaction(folder: Path, transaction: Path, *, dry_run: bool = False) -> list[str]:
+    """Exclude cooperating file/ledger writers throughout recovery.
+
+    The caller still owns the album-directory lock. In particular, ledger
+    appends from private staging do not acquire that directory lock.
+    """
+    folder = folder.resolve()
+    journal = load_journal(transaction)
+    paths: list[Path] = []
+    for entry in journal["entries"]:
+        if not isinstance(entry, dict):
+            raise TypeError("invalid journal entry")
+        paths.append(checked_path(folder, str(entry.get("path") or "")))
+    with ExitStack() as locks:
+        for path in sorted(set(paths)):
+            locks.enter_context(file_lock(path))
+        return _recover_transaction(folder, transaction, dry_run=dry_run)
+
+
+def _recover_transaction(folder: Path, transaction: Path, *, dry_run: bool = False) -> list[str]:
     """Restore a prepared commit or clean a durably completed commit.
 
     The caller must hold the album lock. Validate ALL entries/backups before

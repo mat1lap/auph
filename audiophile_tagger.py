@@ -2986,6 +2986,10 @@ def process_single_track(
                 "discogs_release_id": album_tags.get("discogs_id", ""),
             },
             "track_match": {"confidence": track_match_conf, "recording_id": resolved_recording_id},
+            "album_completeness": {
+                "state": album_tags.get("album_completeness_state", "UNKNOWN"),
+                "evidence": album_tags.get("album_completeness_evidence", []),
+            },
             "release_label_catalog_pairs": album_tags.get("label_catalog_pairs", []),
             "lyrics": {
                 "source": lyrics_source,
@@ -3078,6 +3082,25 @@ def run_loudgain(
     preserve_track_only = False
     cleanup_only = False
     strip_inconsistent_album = False
+    group_field = "REPLAYGAIN_ALBUM_GROUP_SHA256"
+    # Bind album measurements to decoded audio, independent of names/order.
+    # STREAMINFO MD5 can be zero, so it cannot identify the group on its own.
+    group_audio: dict[Path, tuple[tuple[int, int, int, int, int], str]] = {}
+    try:
+        if complete_album:
+            group_audio = {
+                path: (metadata_writer._stream_signature(path), metadata_writer.pcm_digest(path)) for path in flac_files
+            }
+        group_signature = (
+            hashlib.sha256(json.dumps(sorted(group_audio.values())).encode("utf-8")).hexdigest()
+            if complete_album
+            else ""
+        )
+    except (OSError, ValueError, MutagenError, RuntimeError, subprocess.SubprocessError) as exc:
+        if outcome is not None:
+            outcome["status"] = "failed"
+        print(f"WARNING: cannot identify ReplayGain audio group: {exc}", file=sys.stderr)
+        return False
     if loudness_policy.preserve_existing_measurements:
         # A malformed/unreadable input is left to the normal staged loudgain
         # path, which reports its own diagnostic.  Preservation probing must
@@ -3096,14 +3119,17 @@ def run_loudgain(
                 )
                 for path in flac_files
             }
-            if len(album_pairs) == 1:
+            group_verified = all(FLAC(path).get(group_field) == [group_signature] for path in flac_files)
+            if len(album_pairs) == 1 and group_verified:
                 if outcome is not None:
                     outcome["status"] = "preserved"
                 if not quiet:
                     print("  -> REPLAYGAIN: preserved complete existing track/album measurements.")
                 return False
             if not quiet:
-                print("  -> REPLAYGAIN: existing album values disagree between tracks; recalculating.")
+                print(
+                    "  -> REPLAYGAIN: existing album values disagree or lack current audio-group evidence; recalculating."
+                )
             if not lg_bin:
                 preserve_track_only = True
                 strip_inconsistent_album = True
@@ -3111,7 +3137,12 @@ def run_loudgain(
             has_stale_album_gain = any(
                 any(
                     field in FLAC(path)
-                    for field in ("REPLAYGAIN_ALBUM_GAIN", "REPLAYGAIN_ALBUM_PEAK", "REPLAYGAIN_ALBUM_RANGE")
+                    for field in (
+                        "REPLAYGAIN_ALBUM_GAIN",
+                        "REPLAYGAIN_ALBUM_PEAK",
+                        "REPLAYGAIN_ALBUM_RANGE",
+                        group_field,
+                    )
                 )
                 for path in flac_files
             )
@@ -3122,20 +3153,26 @@ def run_loudgain(
                     print("  -> REPLAYGAIN: preserved valid existing track measurements.")
                 return False
             preserve_track_only = True
-    if not lg_bin and not preserve_track_only and not complete_album:
-        # Album measurements cannot describe a known incomplete/unknown set,
-        # even if no usable track measurements or scanner are available.
+    if not lg_bin and not preserve_track_only:
+        # Uncertified album measurements must not survive merely because
+        # track tags are invalid and no scanner is available.
         try:
             cleanup_only = any(
                 any(
                     field in FLAC(path)
-                    for field in ("REPLAYGAIN_ALBUM_GAIN", "REPLAYGAIN_ALBUM_PEAK", "REPLAYGAIN_ALBUM_RANGE")
+                    for field in (
+                        "REPLAYGAIN_ALBUM_GAIN",
+                        "REPLAYGAIN_ALBUM_PEAK",
+                        "REPLAYGAIN_ALBUM_RANGE",
+                        group_field,
+                    )
                 )
                 for path in flac_files
             )
         except (OSError, ValueError):
             cleanup_only = False
         preserve_track_only = cleanup_only
+        strip_inconsistent_album = cleanup_only and complete_album
     if not lg_bin and not preserve_track_only:
         if outcome is not None:
             outcome["status"] = "unavailable"
@@ -3154,7 +3191,7 @@ def run_loudgain(
     try:
         if any(path.is_symlink() for path in flac_files):
             raise ValueError("refusing ReplayGain replacement of a symlinked FLAC")
-        before_audio = {
+        before_audio = group_audio or {
             path: (metadata_writer._stream_signature(path), metadata_writer.pcm_digest(path)) for path in flac_files
         }
         for index, original in enumerate(flac_files):
@@ -3205,9 +3242,13 @@ def run_loudgain(
                 validation_errors.extend(f"{original.name}: {error}" for error in errors)
             if not complete_album or strip_inconsistent_album:
                 audio = FLAC(pending)
-                for field in ("REPLAYGAIN_ALBUM_GAIN", "REPLAYGAIN_ALBUM_PEAK", "REPLAYGAIN_ALBUM_RANGE"):
+                for field in ("REPLAYGAIN_ALBUM_GAIN", "REPLAYGAIN_ALBUM_PEAK", "REPLAYGAIN_ALBUM_RANGE", group_field):
                     if field in audio:
                         del audio[field]
+                audio.save()
+            elif not validation_errors:
+                audio = FLAC(pending)
+                audio[group_field] = [group_signature]
                 audio.save()
         if complete_album and not strip_inconsistent_album and not validation_errors:
             gain_pairs = {
@@ -3349,6 +3390,10 @@ def resolve_cover_release_identity(
             local_mbids.update(str(value).strip() for value in FLAC(track_file).get("MUSICBRAINZ_ALBUMID", []) if value)
         except (OSError, ValueError, MutagenError):
             return "", mb_release_group_id
+    if len(local_mbids) > 1:
+        print(
+            "  -> IDENTITY REVIEW: conflicting existing MusicBrainz release IDs; verify edition barcode/catalog and disc IDs. Existing IDs preserved, not used for cover identity."
+        )
     if len(local_mbids) != 1 or not discogs_id:
         return "", mb_release_group_id
     local_mbid = next(iter(local_mbids))
@@ -3379,6 +3424,11 @@ def resolve_cover_release_identity(
         and (not barcode or (bool(local_barcode) and bool(remote_barcode) and local_barcode == remote_barcode))
     ):
         return local_mbid, str((record.get("release-group") or {}).get("id") or "")
+    print(
+        f"  -> IDENTITY REVIEW: existing MusicBrainz release {local_mbid} does not corroborate "
+        f"Discogs {discogs_id} and local barcode/title. Verify edition barcode/catalog and disc IDs. "
+        "Existing IDs preserved, not used for cover identity."
+    )
     return "", mb_release_group_id
 
 
@@ -4179,6 +4229,7 @@ def process_album(
         mb_albumartist_ids = []
         mb_albumartist_sort = ""
         if selection.confidence is release_match.ReleaseConfidence.AMBIGUOUS:
+            mb_match_kind = selection.confidence.value
             print(f"  -> MB REVIEW REQUIRED: {selection.reason}; release-specific MB tags withheld.")
 
     # Folder dates are organizational hints, not evidence of an original

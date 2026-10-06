@@ -443,13 +443,13 @@ not implemented features. The code's finite TTLs, matching gates and bounded
 retries were inspected instead of accepting their labels as proof.
 
 R01 is scoped to album transactions and default/same-parent standalone ledgers.
-Automatic journal recovery for a custom provenance file outside the FLAC parent
-is **not implemented**; it is not externally untestable and is not represented
-as a fixed feature. The existing explicitly selected outside-directory ledger
-API retains its catchable rollback/manual-recovery behavior. Extending recovery
-requires an authorized external-root contract and two-root publication/kill/
-recovery tests; accepting arbitrary absolute paths from a journal would weaken
-its path boundary. Legacy unjournaled trees similarly require manual review.
+Standalone outside-directory FLAC/ledger commits are now explicitly rejected
+before enrichment writes (G03 below), rather than permitting an unjournaled
+publication. Private staging-ledger writes remain supported: their owning album
+transaction publishes artifacts and provenance together. Same-parent custom
+ledger names remain supported. No arbitrary external paths are accepted from
+a recovery journal. Legacy external-ledger writes still require manual review;
+this change cannot reconstruct journals for historical unjournaled writes.
 
 Player compatibility for D: SYNCEDLYRICS is reopened as blocked verification:
 writing the compatibility tag is tested, playback in the user's selected player
@@ -540,7 +540,7 @@ editions remain INCOMPLETE; grouping is not forced to COMPLETE.
 | RW04 / R10 diagnostics | Dry-run announced writing and incorrectly attributed DR14 skip to --no-dr14. | Report planning and actual --dry-run reason. Real corrected CLI dry-run and focused production regression pass without album changes. | fixed and verified |
 | R11 live services | Previously no authenticated live evidence. | Credentialed Discogs and public MusicBrainz/LRCLIB checked live; NetEase/QQ and several text providers produced candidates. Spotify/Deezer auth, Yandex/VK/Metal-Archives blocking, TLS/parser/rate-limit failures remain distinctly reported; matrix in validation report. | blocked for remaining routes; partially live verified |
 | D: SYNCEDLYRICS | Personal player compatibility is still not established. | Installed mpv renders embedded artwork and IPC parses an external LRC cue at its real time; no GUI/plain/embedded-lyrics assertion. IPC controlled quit exits 4, not a successful normal playback claim. | blocked for remaining interoperability checks |
-| R18 complete/multi-disc live coverage | No such actual albums were located; query for another path unanswered. | Synthetic positioned multi-disc/conflict regressions pass, but these do not replace real complete/multi-disc runs. | blocked by missing representative input |
+| R18 complete/multi-disc live coverage | No such actual albums were located; query for another path unanswered. | Generated complete/multi-disc production, commit and real-scanner coverage is now closed by G01/G02; actual complete/multi-disc provider compatibility remains unverified. | implementation verified synthetically; live inputs unavailable |
 
 Added `test_real_world_regressions.py`: 6 cases. Corrected initial test-call/schema
 mistakes before recording reproductions; two integration cases and the diagnostic
@@ -559,3 +559,40 @@ peaks, no album gain fields, decoded PCM unchanged. Existing valid measurements
 were preserved in the other scenarios; successful cleanup is not substituted
 for a scanner run. Personal GUI/embedded lyric display and real complete/multi-disc
 inputs remain missing; actual terminal Kitty rendering was not observed.
+
+## Autonomous gap closure after 1521bb9
+
+Inspected current HEAD 1521bb9 and unresolved R01/R11/R18/player limits, including
+663992b/e32fbc5 implementation and follow-up history. This is targeted gap closure,
+not a new general audit. All generated writes use temporary independent FLACs.
+
+| Reference | Root cause / acceptance | Disposition and evidence |
+|---|---|---|
+| G01 / R18 | Missing complete/multi-disc production coverage. | Fixed and verified synthetically: full single disc, full two discs with repeated positions, one missing disc-2 track, nonconsecutive/shuffled files, conflicting totals, UNKNOWN identity and ambiguous edition. Real identification, writer, staging, commit, dry-run/repeat and decoded PCM checks execute; MB/Discogs/acquisition boundaries use fixtures. Supported external totals populate missing tags; conflicting curated totals are preserved with review. UNKNOWN remains track-only on that run; a subsequent run can become COMPLETE after supported identity is written. |
+| G02 / loudness | Equal existing album tags could describe a different audio grouping. | Fixed and verified: decoded-audio multiset fingerprint is required for preservation. Rescan legacy/changed groups; unavailable scanner clears uncertified album fields while preserving valid track measurements. Test same-sized different audio groups, absent STREAMINFO checksums, reversed order, real loudgain, nonzero subprocess exit and incomplete successful output. No partially scanned album is published. |
+| G03 / R01 external ledgers | Standalone external ledger bypassed all journal preparation. | Resolved by explicit configuration rejection before FLAC/temp/archive/ledger enrichment writes, including repeat attempts. Same-parent ledgers and private staging remain supported. Prior shared-ledger writer test now uses the supported private staging path and retains its original transaction-ID/concurrency assertions. External standalone publication/recovery is not implemented or claimed; historical writes require manual review. |
+| G04 / V09 recovery | Recovery held album lock but not ledger lock; a cooperating private-staging appender could change or lose a row during restoration. | Fixed and verified: lock all checked journal targets, in deterministic order, from validation through restoration/cleanup. Real second-process append waits and survives after rollback. Existing killed-writer, interrupted cleanup/repeated recovery and retained-snapshot cases rerun. Multiple replacements remain observable; no power-loss/portable-filesystem claim. |
+| G05 / release diagnostics | Ambiguous selection was printed but provenance/track context reverted to NONE. Conflicting existing MB release IDs were silently withheld from artwork. | Fixed and verified: preserve AMBIGUOUS in context, add completeness state/evidence, print existing-ID review and needed barcode/catalog/disc evidence. Sanitized News conflict exercises actual provider query inputs and final artifacts: preserved stale IDs do not supply recording/cover identity or verified provenance. |
+| G06 / R11 | Previously blocked authenticated routes. | Small live adapter checks still yield Spotify/Deezer AUTHENTICATION_ERROR and Yandex BLOCKED. Offline restored-adapter/schema/fallback cases pass. No login/challenge or credentials request; remaining private/live routes remain externally unverified. |
+| G07 / player limits | Missing autonomous artifact readback. | Headless mpv emits a 1400px embedded-cover JPEG (exit 0); image actually viewed. Existing acquired native/raw/plain/LRC forms remain readable, 29/37 ordered cues within duration. Actual Kitty/personal GUI/embedded lyric display remains manual, not an implementation blocker. |
+
+Four regressions were explicitly run against HEAD implementations before fixes:
+external-ledger refusal, stale gain preservation, recovery/append exclusion and
+AMBIGUOUS provenance. Each failed for its intended contract; outputs retained
+in `/home/emvis/flac-gap-validation-20261005/reports/before-fix-*.txt`.
+The final unavailable-scanner/invalid-track variant also failed in both checksum
+cases before its cleanup fix; its reproduction is retained separately.
+Test-construction mistakes (missing curated total in conflict fixture, wrong
+cover attribute/route) were corrected and are not counted as production bugs.
+A Yandex driver supplied an unsupported album argument on its initial attempt;
+that record is separated and the corrected bounded live call reports BLOCKED.
+
+Detailed scenarios, tools, numerical comparison limits and commands are in the
+new section of REAL_WORLD_VALIDATION.md. Unverified compatibility, platform and
+reference-meter limits remain separate from these completed implementation fixes.
+
+Final post-fix full suite: **659 passed in 136.85s**. Focused related suites:
+**112 passed in 25.97s**; selected provider/recovery/real-world suites:
+**50 passed in 18.61s**. Ruff lint/format (49 files), mypy (41 source files),
+pip check and diff check pass. Commands and retained evidence are in the
+validation report; originals were rechecked unchanged.

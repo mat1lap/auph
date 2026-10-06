@@ -840,6 +840,17 @@ def write_tags(
     the original byte-for-byte intact.
     """
     flac_path = Path(flac_path).absolute()
+    # Private album staging is committed by the orchestrator's root journal.
+    # A standalone two-root write has no safe/discoverable recovery contract.
+    if (
+        not is_pipeline_private(flac_path)
+        and provenance_file is not None
+        and Path(provenance_file).absolute().parent != flac_path.parent
+        and load_config().preservation.provenance_ledger
+    ):
+        raise ValueError(
+            "standalone provenance ledger must be in the FLAC directory; external-ledger recovery is unsupported"
+        )
     if not is_pipeline_private(flac_path) and any(
         album_transaction.unfinished_transactions(folder) for folder in {flac_path.parent, writer_album_root(flac_path)}
     ):

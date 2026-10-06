@@ -306,8 +306,8 @@ def test_album_holds_shared_ledger_lock_from_snapshot_through_commit(
     from test_entire_audit import album_fixture
 
     folder, _tracks = album_fixture(tmp_path, monkeypatch)
-    other_folder = tmp_path / "other album"
-    other_folder.mkdir()
+    other_folder = tmp_path / "other album" / ".metadata-transaction-fixture" / "pending"
+    other_folder.mkdir(parents=True)
     other_track = make_flac(other_folder / "other.flac")
     ledger = folder / ".metadata-provenance.jsonl"
     context = multiprocessing.get_context("fork")
@@ -318,6 +318,8 @@ def test_album_holds_shared_ledger_lock_from_snapshot_through_commit(
 
     def independent_append() -> None:
         started.set()
+        # Cross-root ledgers remain supported on disposable staged files;
+        # their owner is responsible for publishing the enclosing transaction.
         metadata_writer.write_tags(other_track, [("CUSTOM", "independent")], provenance_file=ledger)
         done.set()
 

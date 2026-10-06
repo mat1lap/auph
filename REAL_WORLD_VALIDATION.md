@@ -9,10 +9,10 @@ No original album was enriched. No global policy or credentials were changed.
 ## Sample and isolation
 
 The located collection, `/home/emvis/Music/Queen`, contains partial single-disc
-albums only. The request for another complete/multi-disc album location remains
-unanswered. These cases therefore **do not verify real complete-album or
-multi-disc operation**. Synthetic multi-disc regressions complement the real
-sample without replacing that missing validation.
+albums only. These copies do not verify live complete/multi-disc provider identification.
+The subsequent generated production workflows below close implementation and
+real-scanner coverage without requiring additional user albums; live edition
+compatibility for such albums remains unverified.
 
 Selected Innuendo (5/12 tracks), Made in Heaven (3/13 tracks), and the Japanese
 News of the World folder (2/11 tracks). All contain existing embedded/front
@@ -178,9 +178,125 @@ invoke the same production main and delegate actual behavior unchanged, recordin
 only safe summaries. Exact per-mode logs, outcomes and source digests are retained.
 The final diagnostic dry-run and acquisition repeat both exited 0 without changes.
 
-Remaining resources needed: a real complete album and multi-disc album location;
+Remaining live compatibility resources: actual complete/multi-disc edition evidence;
 renewed/authorized provider credentials or accessible responses for failed/private
 routes; the preferred GUI/player configuration for embedded/plain lyrics;
 reference DR-meter vectors; and separate platform/power-loss environments from
 the implementation ledger. No claim of exhaustive provider/player compatibility,
 transcription correctness or filesystem durability follows from this sample.
+
+## Autonomous gap closure — 2026-10-05/06
+
+Baseline HEAD 1521bb9 includes 663992b/e32fbc5. Working tree was clean. New
+workspace: `/home/emvis/flac-gap-validation-20261005` (reports, generated fixtures,
+readback drivers and headless image). Original sample hashes were rechecked
+against the earlier inventory: all three albums and sidecars unchanged.
+No enrichment ran on originals or on symlinks to originals.
+
+Generated stereo 44.1kHz FLACs contain six-second controlled sine signals at
+540/640/740Hz, with deliberately different amplitudes. Embedded disc/track
+positions, opaque shuffled filenames, release/recording IDs, catalog/barcode and
+medium counts are controlled independently. Fixtures replace MusicBrainz,
+Discogs, AcoustID and cover acquisition boundaries; actual matching, selection,
+metadata writing, decoded PCM checks, staging, journal publication and readback
+execute. Lyrics lookup is disabled in these completeness fixtures; the separate
+conflict fixture observes actual lyric query identity inputs, and restored
+adapter/real-world regressions exercise retained lyric forms.
+
+| Generated case | Verified production outcome |
+|---|---|
+| Complete single disc, 2 tracks | COMPLETE; supported total 2; track gains differ; one album pair; dry-run unchanged and repeat unchanged. |
+| Complete two discs, 2+2 tracks | COMPLETE; repeated track numbers resolve to distinct recording/release-track IDs by disc; TRACKTOTAL=2 per medium, DISCTOTAL=2; one album group across both discs. |
+| Two discs missing disc-2 track 1 | INCOMPLETE; correct 1/2 medium mapping; totals remain 2/2, not available counts 2/1; no album gain/peak/range. |
+| Nonconsecutive tracks 1 and 3, shuffled filenames | INCOMPLETE; recording evidence and tags follow positions independently of enumeration; release total 3. |
+| Local total 3 versus matched release total 2 | INCOMPLETE; curated total 3 is preserved with review; no album gain, not forced COMPLETE. |
+| Initially missing artist identity | UNKNOWN propagates to provenance and track-only scan. Supported identity is filled by the verified release; the next run can legitimately become COMPLETE and perform an album scan. |
+| Equal edition candidates | No candidate MB release/recording IDs written; AMBIGUOUS survives into provenance instead of NONE. |
+
+The five primary generated scenarios retain multivalue/custom curated tags,
+unchanged audio and exact repeated-run file hashes (including the ledger).
+Independent `metaflac` and `ffprobe` readback covers 13 FLACs in these five cases.
+FFmpeg PCM hashes equal independently regenerated pre-enrichment signal
+references. These are **synthetic implementation checks**, not evidence of live
+complete/multi-disc edition or provider compatibility.
+
+Actual `/usr/bin/loudgain` 0.6.8, libebur128 1.2.6, executes `-a -k -s e -q`
+for complete groups and `-r -k -s e -q` for incomplete/unknown groups. Track gains
+for the two common signal levels are +17.67/+5.56 dB, peaks
+0.017705/0.070786. Complete single/two-disc groups share +8.31 dB/0.070786.
+Changing order preserves the audio-group fingerprint; changing membership or
+same-sized audio groups forces recalculation. Tests also cover zero STREAMINFO
+MD5s, legacy equal gain pairs lacking group evidence, and unavailable scanner
+cleanup even when existing track tags are invalid (those track fields remain
+explicitly unverified, not fabricated). A nonzero exit after the real scanner writes and a successful process
+with a missing track-gain tag both prevent the entire production album commit;
+original FLAC bytes and absent ledger are verified.
+
+FFmpeg's independent `loudnorm=I=-18:TP=-1:LRA=11:print_format=json` analysis
+reports target-minus-input values +17.75/+5.55 dB for those same tracks, versus
+loudgain's +17.67/+5.56. The third frequency gives +5.45 in both outputs. These
+are short synthetic inputs processed by distinct EBU analysis implementations;
+FFmpeg loudnorm uses its own upsampling/true-peak processing. Measurements and
+settings are retained in `independent-audio-readback.json`. No arbitrary
+agreement tolerance, calibrated standard compliance or exact numerical agreement
+is claimed. Reference-meter vectors and a controlled longer-signal comparison
+would be needed for that stronger conclusion. Neither workflow applies gain to
+samples.
+
+Standalone external ledgers are rejected before enrichment writes. Supported
+same-parent journals and private staging retain their recovery behavior. A real
+second-process ledger appender now waits through recovery, then appends to the
+restored ledger without losing its row. Existing interruption/repeated recovery
+and snapshot-retention tests rerun. Historical unjournaled external writes need
+manual review; there is no new external-root or physical power-loss guarantee.
+
+Read original News identifiers read-only: MBID
+0060992e-439c-34b0-9aeb-9df1dcef23f3, catalog 32XD-409, barcode
+T4988014316538, positions 2/5 and total 11. A sanitized production regression
+reproduces conflicting edition evidence, preserving existing IDs/totals while
+withholding their authority from artwork, lyrics recording queries and matched
+provenance. Diagnostics request edition barcode/catalog/disc evidence, not a
+guessed edition. Original News remains a manual identity-review case.
+
+Bounded current adapter calls using existing access: Spotify AUTHENTICATION_ERROR
+(0.19s), Deezer AUTHENTICATION_ERROR (0.73s), Yandex BLOCKED (0.51s). No useful
+forms returned, no authentication bypass or user credential request. An initial
+Yandex driver wrongly supplied an album argument; that diagnostic is separated
+and is not counted as a provider parser failure. Remaining previously blocked
+providers retain their earlier observed statuses; they were not all retried.
+Offline restored-provider parser/schema/fallback regressions pass.
+
+Headless readback on the existing independent acquisition copies reparses native
+Lyricsfile YAML with current code, preserving plain and synchronized forms with
+no parser warnings. LRC has 29/37 ordered timestamps, within duration. Exact
+native/raw/plain/LRC file hashes are retained without full lyrics in reports.
+Headless mpv exits 0 and renders the 1400×1400 embedded News cover to JPEG;
+that output was actually viewed and shows the expected front composition.
+This is not a new edition-certainty claim or personal GUI/Kitty/embedded-lyrics
+compatibility check. Those manual checks remain pending.
+
+Commands executed from `/home/emvis/Music/auph`:
+
+- Baseline `.venv/bin/pytest -q`: 645 passed, 107.96s.
+- Final `.venv/bin/pytest -q` (captured with `tee` to `reports/final-pytest.txt`): **659 passed, 136.85s**, after the unavailable-scanner cleanup fix.
+- `.venv/bin/pytest -q test_gap_workflows.py --basetemp=/home/emvis/flac-gap-validation-20261005/final-synthetic-tests`: 14 passed, 12.36s.
+- `.venv/bin/pytest -q test_gap_workflows.py test_restored_lyrics_providers.py test_real_world_regressions.py test_independent_verification.py`: 50 passed, 18.61s.
+- Four before-fix regressions against saved HEAD source: 2+2 expected failures; restored current source afterward. Sanitized outputs in `reports/before-fix-*.txt`.
+- Unavailable-scanner/invalid-track regression against its immediately preceding implementation: 2 expected failures, then passes after cleanup fix.
+- `.venv/bin/pytest -q test_gap_workflows.py test_regression_repair.py test_entire_audit.py`: 112 passed, 25.97s.
+- `.venv/bin/ruff check .`: passed after fixing two local lint findings.
+- `.venv/bin/ruff format --check .`: 49 files formatted.
+- `.venv/bin/mypy .`: passed, 41 source files.
+- `.venv/bin/python -m pip check`: no broken requirements.
+- `git diff --check`: passed.
+- `.venv/bin/python /home/emvis/flac-gap-validation-20261005/inspect_audio.py`: 5 cases/13 FLACs; independent reference PCM equality; measurement report written.
+- `.venv/bin/python /home/emvis/flac-gap-validation-20261005/live_checks.py`: bounded live statuses above (corrected Yandex-only rerun preserves preceding Spotify/Deezer observations).
+- `.venv/bin/python /home/emvis/flac-gap-validation-20261005/headless_artifacts.py`: mpv exit 0; image decode and artifact/timestamp readback passed.
+- `.venv/bin/python /home/emvis/flac-validation-20261005/validate.py originals`: all three original sample inventories unchanged.
+
+Unresolved implementation work for these selected gaps: none. Explicit rejection
+closes the unsafe external-ledger configuration rather than implementing a
+multi-root transaction. Remaining compatibility checks: live complete/multi-disc
+editions, blocked authenticated services, personal GUI/Kitty/embedded lyric
+playback, reference DR/loudness certification, and other platform/power-loss
+behavior. No general bug-free or exhaustive provider assertion is made.

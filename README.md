@@ -361,7 +361,11 @@ for inspection. A fully committed journal cleans up without undoing the new
 metadata. Recovery records a durable rolled-back state before cleanup, so an
 interrupted cleanup can be retried even after snapshots have been removed.
 Root recovery includes normal direct CD/Disc subfolder journals and holds the
-same album-root lock used by standalone writers. Legacy trees and standalone ledgers outside the track directory
+same album-root lock used by standalone writers. Recovery also holds file/ledger
+locks throughout validation and restoration, excluding cooperating appenders.
+Standalone writes with a provenance ledger outside the track directory are
+rejected before enrichment; use a same-directory ledger, or the tagger’s private
+staging workflow. Historical unjournaled external-ledger writes and legacy trees
 remain manual-recovery cases. Unknown outside-journal temporary files are left
 for inspection. Multiple replacements are still observable individually.
 
@@ -411,3 +415,12 @@ supported edition without becoming complete albums. Medium track totals come
 from release positions rather than the number of files currently present.
 The tested real sample contains only partial single-disc albums; live complete
 and multi-disc operation and personal player compatibility remain unverified.
+
+Complete-album ReplayGain preservation requires equal valid gain/peak values
+and a `REPLAYGAIN_ALBUM_GROUP_SHA256` matching the current decoded audio multiset.
+Names and enumeration order do not affect that fingerprint. Existing album
+measurements without group evidence are rescanned; if the scanner is unavailable,
+valid track measurements are preserved and uncertified album fields cleared.
+Incomplete/unknown groups use track-only measurements and clear album fields,
+including the group fingerprint. Explicitly disabling loudness skips this policy.
+The first complete-album run may therefore update legacy gain tags.
