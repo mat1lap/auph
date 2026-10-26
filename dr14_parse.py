@@ -358,6 +358,10 @@ def resolve_to_files(tracks: list[dict[str, object]], target_files: list[Path]) 
             if len(report_path.parts) > 1
             else [f for f in available if f.name.casefold() == c_name.casefold()]
         )
+        if not matches and len(report_path.parts) > 1:
+            # Explicit directory evidence cannot be discarded to attach a
+            # measurement to another disc with the same filename/title.
+            continue
         if not matches:
             matches = [f for f in available if f.stem.casefold() == stem.casefold()]
         if not matches:
@@ -569,6 +573,12 @@ def match_dr_entry(
 
 def main() -> int:
     args = list(sys.argv[1:])
+    if args in (["-h"], ["--help"]):
+        print(
+            "usage: dr14_parse.py REPORT_OR_AUDIO_DIRECTORY [AUDIO_FILES ...]\n"
+            "       dr14_parse.py --match-db ARTIST ALBUM [--catno CATNO] [--dr DR] [--year YEAR] [--media MEDIA]"
+        )
+        return 0
     if "--match-db" in args:
         idx = args.index("--match-db")
         args.pop(idx)

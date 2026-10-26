@@ -2,6 +2,10 @@
 
 Current follow-up: [IMPLEMENTATION_BACKLOG.md](IMPLEMENTATION_BACKLOG.md) records the
 2026-10-05 implementation and verification; older findings/counts below are historical.
+The [October 6 implementation audit](COMPREHENSIVE_AUDIT_2026-10-06.md) is the
+current coverage and validation record. In particular, this historical report's
+limitations concerning absent recovery journals, shared sessions and full-memory
+native DR decoding describe the earlier checkout, not the current implementation.
 
 Baseline: clean checkout `87e9d4d` in `/home/emvis/Music/auph`.
 No repository/ancestor AGENTS instructions were present. Production dependencies

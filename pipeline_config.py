@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -53,11 +54,92 @@ class PreservationPolicy:
 
 
 @dataclass(frozen=True)
+class SearchPolicy:
+    jackett_url: str = ""
+    jackett_indexer: str = "rutracker"
+    jackett_key_env: str = "JACKETT_API_KEY"
+    topic_base_url: str = "https://rutracker.org/forum"
+    topic_cookie_env: str = "RUTRACKER_COOKIE"
+    flaresolverr_url: str = ""
+    flaresolverr_timeout: float = 30.0
+    details: bool = True
+    detail_mode: str = "targeted"
+    detail_budget: int = 5
+    detail_time_budget: float = 180.0
+    preliminary_llm: bool = False
+    detail_cache_directory: str = ""
+    detail_cache_ttl: float = 3600.0
+    result_limit: int = 50
+    page_size: int = 25
+    max_pages: int = 4
+    timeout: float = 15.0
+    prefer_lossless: bool = True
+    prefer_documented_rip: bool = True
+    allow_partial: bool = False
+    backend: str = "none"
+    remote_metadata_disclosure: bool = False
+    openai_endpoint: str = "https://api.openai.com/v1/chat/completions"
+    openai_model: str = ""
+    openai_key_env: str = "OPENAI_API_KEY"
+    gemini_endpoint: str = "https://generativelanguage.googleapis.com/v1beta"
+    gemini_model: str = ""
+    gemini_max_output_tokens: int = 2048
+    gemini_thinking_level: str = ""
+    gemini_key_env: str = "GEMINI_API_KEY"
+    local_endpoint: str = ""
+    local_model: str = ""
+    local_key_env: str = "LOCAL_LLM_API_KEY"
+    research_backend: str = "none"
+    research_endpoint: str = "https://api.search.brave.com/res/v1/web/search"
+    research_serper_endpoint: str = "https://google.serper.dev/search"
+    research_key_env: str = "BRAVE_SEARCH_API_KEY"
+    research_disclosure: bool = False
+    research_domains: str = "forums.stevehoffman.tv"
+    research_queries: int = 3
+    research_page_transport: str = "direct"
+    research_flaresolverr_url: str = ""
+    research_pages: int = 5
+    research_cache_directory: str = ""
+    research_cache_ttl: float = 86400.0
+    structured_mode: str = "json"
+    mastering_pipeline: bool = True
+    research_adaptive: bool = True
+    research_posts_per_page: int = 80
+    research_follow_pages: bool = True
+    mastering_max_sources: int = 40
+    mastering_batch_size: int = 8
+    mastering_literal_recovery: bool = True
+    mastering_output_tokens: int = 8192
+    openai_api: str = "chat"  # chat | responses
+    openai_responses_endpoint: str = "https://api.openai.com/v1/responses"
+    openai_reasoning_effort: str = "high"
+    research_openai_discovery: bool = False
+    research_openai_model: str = ""
+    research_openai_tool_calls: int = 4
+    qbittorrent_url: str = ""
+    qbittorrent_user_env: str = "QBITTORRENT_USERNAME"
+    qbittorrent_password_env: str = "QBITTORRENT_PASSWORD"
+    save_path: str = ""
+    state_directory: str = ""
+
+    def __post_init__(self) -> None:
+        for name, value in asdict(self).items():
+            if name.endswith("_env") and (
+                not isinstance(value, str)
+                or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", value)
+                or value.startswith(("AIza", "sk-", "sk_"))
+            ):
+                # Never echo this value: it may be an accidentally pasted credential.
+                raise ValueError(f"search.{name} must contain an environment variable name, not a credential")
+
+
+@dataclass(frozen=True)
 class PipelineConfig:
     matching: MatchingPolicy = MatchingPolicy()
     lyrics: LyricsPolicy = LyricsPolicy()
     loudness: LoudnessPolicy = LoudnessPolicy()
     preservation: PreservationPolicy = PreservationPolicy()
+    search: SearchPolicy = SearchPolicy()
 
 
 class _ConfigLoader:
@@ -111,11 +193,18 @@ def _load_selected_config(path: str, _mtime_ns: int, _size: int) -> PipelineConf
                 if not isinstance(value, str) or value.upper() not in {"UNKNOWN", "LOW", "MEDIUM", "HIGH", "VERIFIED"}:
                     raise ValueError(f"{key} must name a supported confidence level")
                 values[name] = value.upper()
+            elif section == "search":
+                if isinstance(default, int):
+                    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                        raise ValueError(f"{key} must be a positive integer")
+                elif not isinstance(value, str):
+                    raise TypeError(f"{key} must be text")
     return PipelineConfig(
         matching=MatchingPolicy(**data.get("matching", {})),
         lyrics=LyricsPolicy(**data.get("lyrics", {})),
         loudness=LoudnessPolicy(**data.get("loudness", {})),
         preservation=PreservationPolicy(**data.get("preservation", {})),
+        search=SearchPolicy(**data.get("search", {})),
     )
 
 

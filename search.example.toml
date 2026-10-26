@@ -1,0 +1,89 @@
+# Select with AUDIOPHILE_CONFIG=/absolute/path/to/your-policy.toml.
+# This section can be appended to the existing metadata policy. Never put secrets here.
+[search]
+jackett_url = "http://127.0.0.1:9117"
+jackett_indexer = "rutracker" # RuTracker.org, never all/filter/rutracker-ru
+jackett_key_env = "JACKETT_API_KEY"
+topic_base_url = "https://rutracker.org/forum"
+topic_cookie_env = "RUTRACKER_COOKIE" # authorized cookie header; optional details
+# Optional separate detail transport; Jackett's setting is not inherited.
+flaresolverr_url = ""
+flaresolverr_timeout = 30.0
+# Targeted details are the new default; all discoveries always remain in CSV.
+detail_mode = "targeted" # targeted | full (full ignores count cap, retains deadline)
+detail_budget = 5
+detail_time_budget = 180.0 # deadline to START requests; in-flight request can finish later
+preliminary_llm = false # additional priority call; never removes candidates
+# Optional positive parsed-evidence cache; no raw HTML or credential values.
+detail_cache_directory = "" # e.g. /home/YOUR_USER/.cache/auph/search-details
+detail_cache_ttl = 3600.0 # seconds, 0 disables reads; --refresh-details ignores cache
+result_limit = 50
+page_size = 25
+max_pages = 4
+timeout = 15.0
+prefer_lossless = true
+prefer_documented_rip = true
+allow_partial = false
+backend = "none" # none | gemini | openai | local
+# Explicit consent to disclose normalized query/topic evidence to a remote model:
+remote_metadata_disclosure = false
+# Set an actual model available to your account/server. No model is guessed.
+openai_endpoint = "https://api.openai.com/v1/chat/completions"
+openai_model = ""
+openai_key_env = "OPENAI_API_KEY"
+gemini_endpoint = "https://generativelanguage.googleapis.com/v1beta"
+gemini_model = ""
+gemini_max_output_tokens = 2048 # bounded output; thinking may consume tokens
+gemini_thinking_level = "" # provider default; opt-in low etc require model support
+gemini_key_env = "GEMINI_API_KEY"
+local_endpoint = "http://127.0.0.1:1234/v1/chat/completions"
+local_model = ""
+local_key_env = "LOCAL_LLM_API_KEY" # optional for local
+structured_mode = "json" # schema | json | text; still validated locally
+qbittorrent_url = "http://127.0.0.1:8080"
+qbittorrent_user_env = "QBITTORRENT_USERNAME"
+qbittorrent_password_env = "QBITTORRENT_PASSWORD"
+save_path = "" # absolute destination on qBittorrent host; required for --submit
+state_directory = "" # default: $XDG_STATE_HOME/auph/search-submissions
+
+# Separate external mastering research. Disabled until explicitly configured.
+research_backend = "none" # none | brave | serper (separate search API access)
+research_endpoint = "https://api.search.brave.com/res/v1/web/search"
+research_key_env = "BRAVE_SEARCH_API_KEY"
+research_disclosure = false # opt-in: artist/album/edition identifiers sent to search
+research_domains = "forums.stevehoffman.tv" # comma-separated exact public hostnames
+research_queries = 3 # 1..8; album-wide first, then known edition identifiers
+research_pages = 5 # 1..10; snippets beyond the cap remain explicitly unverified
+research_cache_directory = "" # e.g. /home/YOUR_USER/.cache/auph/mastering
+research_cache_ttl = 86400.0 # successful normalized evidence, seconds; 0 bypasses stale reads
+
+# Alternate external research backend (inside [search]):
+# research_backend = "serper"
+# research_key_env = "SERPER_API_KEY"
+# research_serper_endpoint = "https://google.serper.dev/search"
+# research_disclosure = true
+# Explicit public forum browser reading; defaults to direct:
+# research_page_transport = "flaresolverr"
+# research_flaresolverr_url = "" # reuse configured solver; optional forum-only override
+
+# Mastering-first pipeline: independent extraction and decision calls, followed by
+# deterministic selection of a rip inside the recommended reported mastering family.
+mastering_pipeline = true # false retains the legacy combined-response protocol
+research_adaptive = true # with >=4 queries: broad discovery, learned editions, dissent
+research_follow_pages = true # next pages share the research_pages HTTP budget
+research_posts_per_page = 80 # 1..200; quotes retained separately, never counted as votes
+mastering_max_sources = 40 # 1..100; page diversity and comparison context priority
+mastering_batch_size = 8 # 1..100; default 8 posts per extraction call; 100 for a single-call baseline
+mastering_literal_recovery = true # retain explicit own preferences independently of model omissions; no extra API calls
+mastering_output_tokens = 16384 # 1..32768; separate from the legacy evaluation token cap
+
+# To use Astra for extraction/decision, set backend="openai" and an explicit model:
+openai_api = "chat" # chat | responses (Astra example: responses)
+openai_responses_endpoint = "https://api.openai.com/v1/responses"
+openai_reasoning_effort = "high" # low | medium | high | xhigh
+# Optional separate Astra discovery. Its citations are discovery only; the forum
+# pages still need to be fetched and validated. Requires OPENAI_API_KEY plus both
+# disclosure flags. Does not send RuTracker cookies or download URLs.
+research_openai_discovery = false
+research_openai_model = "" # e.g. gpt-6-astra, explicitly opt in
+research_openai_tool_calls = 4 # 1..10, per discovery response

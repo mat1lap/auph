@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import glob
 import json
 import os
 import re
@@ -29,6 +30,7 @@ import requests
 from mutagen.flac import FLAC
 
 from library_files import is_pipeline_private, iter_library_flacs
+from library_layout import DISC_DIR_RE, position_evidence
 from mb_discid_from_cue import build, read_text_robust
 from mb_identity_score import rank_acoustid_results
 from pipeline_config import load_config
@@ -187,6 +189,7 @@ class DiscogsFinder:
         local_durations: list[float] = []
         local_titles: list[str] = []
         local_track_numbers: list[int] = []
+        positioned: list[tuple[int, int, str, float]] = []
 
         for f in self.flac_files:
             try:
@@ -230,15 +233,30 @@ class DiscogsFinder:
                         tnum_val = int(m.group(1))
                 if tnum_val is not None:
                     local_track_numbers.append(tnum_val)
+                disc, track, _title, conflicts = position_evidence(f, self.folder, tags)
+                if disc is not None and track is not None and not conflicts and audio.info:
+                    positioned.append((disc, track, title_val, round(audio.info.length, 3)))
             except Exception:
                 pass
 
+        # Filename enumeration is deterministic but is not musical order.
+        # Missing/conflicting/duplicate positions cannot support an ordered
+        # duration/title comparison against a provider tracklist.
+        if len(positioned) == len(self.flac_files) and len({row[:2] for row in positioned}) == len(positioned):
+            positioned.sort(key=lambda row: row[:2])
+            local_titles = [row[2] for row in positioned]
+            local_durations = [row[3] for row in positioned]
+        else:
+            local_titles, local_durations = [], []
+
         # 2. Extract from CUE, LOG, TXT, ACCURIP
-        cue_and_log_files = (
-            list(self.folder.glob("*.cue"))
-            + list(self.folder.glob("*.log"))
-            + list(self.folder.glob("*.txt"))
-            + list(self.folder.glob("*.accurip"))
+        cue_and_log_files = sorted(
+            path
+            for path in self.folder.rglob("*")
+            if path.is_file()
+            and not path.is_symlink()
+            and not is_pipeline_private(path, root=self.folder)
+            and path.suffix.casefold() in {".cue", ".log", ".txt", ".accurip"}
         )
 
         for meta_file in cue_and_log_files:
@@ -364,6 +382,31 @@ class DiscogsFinder:
     def search_candidates(self, local: dict[str, Any]) -> dict[str, dict[str, Any]]:
         """Query Discogs & MusicBrainz in multiple tiers and return candidate releases map."""
         candidates: dict[str, dict[str, Any]] = {}
+
+        def search(url: str) -> dict[str, Any]:
+            """Keep bounded pages before edition validation, including partial success."""
+            rows: list[dict[str, Any]] = []
+            total_pages = 1
+            for page in range(1, 4):
+                page_url = url if page == 1 else url + f"&page={page}"
+                response = self.discogs_api_get(page_url)
+                if not response or not isinstance(response.get("results"), list):
+                    if page > 1:
+                        print("WARNING: Discogs search pagination failed; retained earlier results.", file=sys.stderr)
+                    break
+                rows.extend(row for row in response["results"][:50] if isinstance(row, dict))
+                pagination = response.get("pagination")
+                if isinstance(pagination, dict):
+                    try:
+                        total_pages = max(1, int(pagination.get("pages", 1)))
+                    except (TypeError, ValueError, OverflowError):
+                        print("WARNING: invalid Discogs search pagination.", file=sys.stderr)
+                        break
+                if page >= total_pages:
+                    break
+            if total_pages > 3:
+                print("WARNING: Discogs search truncated to 3 pages (at most 150 rows).", file=sys.stderr)
+            return {"results": rows}
 
         def record_candidate(
             release_id: str | int,
@@ -498,32 +541,32 @@ class DiscogsFinder:
             seen_cat_searches.add(catnorm(clean_c))
 
             # Query with artist and catno
-            params = {"catno": clean_c, "type": "release"}
+            params = {"catno": clean_c, "type": "release", "per_page": "50"}
             if self.artist:
                 params["artist"] = self.artist
             url = f"https://api.discogs.com/database/search?{urllib.parse.urlencode(params)}"
-            res = self.discogs_api_get(url)
+            res = search(url)
             if res and "results" in res:
-                for row in res["results"][:10]:
+                for row in res["results"]:
                     record_candidate(row.get("id"), f"Discogs-CatNo({clean_c})", bonus=500, extra=row)
 
             # Fallback without artist if 0 results
             if not res or not res.get("results"):
-                params_no_art = {"catno": clean_c, "type": "release"}
+                params_no_art = {"catno": clean_c, "type": "release", "per_page": "50"}
                 url_no_art = f"https://api.discogs.com/database/search?{urllib.parse.urlencode(params_no_art)}"
-                res_no_art = self.discogs_api_get(url_no_art)
+                res_no_art = search(url_no_art)
                 if res_no_art and "results" in res_no_art:
-                    for row in res_no_art["results"][:8]:
+                    for row in res_no_art["results"]:
                         record_candidate(row.get("id"), f"Discogs-CatNo-global({clean_c})", bonus=400, extra=row)
 
         for bar in local.get("barcodes", []):
             clean_b = barnorm(bar)
             if len(clean_b) not in (11, 12, 13):
                 continue
-            url = f"https://api.discogs.com/database/search?{urllib.parse.urlencode({'barcode': clean_b, 'type': 'release'})}"
-            res = self.discogs_api_get(url)
+            url = f"https://api.discogs.com/database/search?{urllib.parse.urlencode({'barcode': clean_b, 'type': 'release', 'per_page': '50'})}"
+            res = search(url)
             if res and "results" in res:
-                for row in res["results"][:8]:
+                for row in res["results"]:
                     record_candidate(row.get("id"), f"Discogs-Barcode({clean_b})", bonus=600, extra=row)
 
         # Tier 3: precise edition-keyword searches.  Every request/result is
@@ -532,10 +575,10 @@ class DiscogsFinder:
             clean_kw = re.sub(r"[\(\)\[\]]", " ", kw).strip()
             if any(k in clean_kw.lower() for k in ("dcc", "mfsl", "mofi", "cp32", "32xd", "target", "udcd")):
                 query_str = f"{self.artist} {self.album} {clean_kw}".strip()
-                url = f"https://api.discogs.com/database/search?{urllib.parse.urlencode({'q': query_str, 'type': 'release'})}"
-                res = self.discogs_api_get(url)
+                url = f"https://api.discogs.com/database/search?{urllib.parse.urlencode({'q': query_str, 'type': 'release', 'per_page': '50'})}"
+                res = search(url)
                 if res and "results" in res:
-                    for row in res["results"][:15]:
+                    for row in res["results"]:
                         record_candidate(row.get("id"), f"Discogs-Keyword({clean_kw})", bonus=350, extra=row)
 
         # Tier 4: Artist + Title + CD Format search (Broad fallback)
@@ -548,9 +591,9 @@ class DiscogsFinder:
                 "per_page": "50",
             }
             url = f"https://api.discogs.com/database/search?{urllib.parse.urlencode(params)}"
-            res = self.discogs_api_get(url)
+            res = search(url)
             if res and "results" in res:
-                for row in res["results"][:25]:
+                for row in res["results"]:
                     record_candidate(row.get("id"), "Discogs-Artist-Title-CD", bonus=100, extra=row)
 
         # Tier 5: MusicBrainz Artist + Release query for Discogs relationships
@@ -873,7 +916,7 @@ class DiscogsFinder:
 def find_album_folders(paths: Sequence[str | Path], base_dir: Path | None = None) -> list[Path]:
     """Discover all album directories under given paths (library root, artist dir, album dir, or glob)."""
     album_dirs: set[Path] = set()
-    disc_pattern = re.compile(r"^(cd|disc|disk)[-_ ]*\d+$", re.IGNORECASE)
+    disc_pattern = DISC_DIR_RE
     base = (base_dir or Path.cwd()).resolve()
 
     def process_dir(root: Path) -> None:
@@ -882,7 +925,13 @@ def find_album_folders(paths: Sequence[str | Path], base_dir: Path | None = None
         if is_pipeline_private(root, root=base):
             return
         # If directory contains .flac files directly
-        if any(p.is_file() and not p.is_symlink() and p.suffix.casefold() == ".flac" for p in root.iterdir()):
+        if any(
+            p.is_file()
+            and not p.is_symlink()
+            and p.suffix.casefold() == ".flac"
+            and not is_pipeline_private(p, root=base)
+            for p in root.iterdir()
+        ):
             if disc_pattern.match(root.name) and root.parent.exists() and root.parent != base:
                 album_dirs.add(root.parent.resolve())
             else:
@@ -900,13 +949,13 @@ def find_album_folders(paths: Sequence[str | Path], base_dir: Path | None = None
                 album_dirs.add(parent)
 
     for p_val in paths:
-        raw_str = str(p_val).strip()
+        raw_str = str(p_val).strip().strip("\"'")
         if not raw_str:
             continue
         p = Path(raw_str)
         if not p.is_absolute():
             p = base / p
-        if p.is_symlink() or is_pipeline_private(p, root=base):
+        if p.is_symlink() or any(parent.is_symlink() for parent in p.parents) or is_pipeline_private(p, root=base):
             continue
         if p.exists():
             if p.is_file():
@@ -915,6 +964,20 @@ def find_album_folders(paths: Sequence[str | Path], base_dir: Path | None = None
             elif p.is_dir():
                 process_dir(p.resolve())
         else:
+            if glob.has_magic(raw_str):
+                for name in glob.iglob(str(p), recursive=True):
+                    match = Path(name)
+                    if match.is_symlink() or is_pipeline_private(match, root=base):
+                        continue
+                    # glob can traverse symlinked parents. Such matches are
+                    # outside the explicit path contract even if the leaf is real.
+                    if any(parent.is_symlink() for parent in match.parents):
+                        continue
+                    if match.is_dir():
+                        process_dir(match)
+                    elif match.is_file() and match.suffix.casefold() == ".flac":
+                        process_dir(match.parent)
+                continue
             # Pattern / substring matching against directories
             clean_term = raw_str.strip("\"'")
             matched = False

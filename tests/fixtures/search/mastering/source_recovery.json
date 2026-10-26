@@ -1,0 +1,449 @@
+{
+  "provenance": "Retained original forum posts and same-thread artist identity anchors from the frozen 2026-10-14 corpus. No reconstructed HTML or missing sentences.",
+  "cases": [
+    {
+      "query": {
+        "text": "",
+        "artist": "Queen",
+        "title": "Jazz",
+        "release_type": "album"
+      },
+      "source_id": "forum:c50f17f0be36d719d8b8",
+      "target_literal": "EMI CDP 7 46210 2",
+      "expected_preference": true,
+      "sources": [
+        {
+          "source_id": "forum:c50f17f0be36d719d8b8",
+          "url": "https://forums.stevehoffman.tv/threads/rolands-favorite-cd-versions-of-queen-albums.141208/page-19#post-17309406",
+          "author": "abzach",
+          "date": "",
+          "excerpt": "Jazz - EMI CDP 7 46210 2",
+          "page_title": "Roland's favorite CD versions of Queen albums | Page 19 | Steve Hoffman Music Forums",
+          "context_complete": false,
+          "context_scope": "unquoted_post_excerpt",
+          "discussion_complete": false,
+          "context_limitations": [
+            "post_units_omitted"
+          ],
+          "page_status": "FOUND",
+          "scope": "post_excerpt",
+          "post_id": "post-17309406",
+          "album_relevance": "direct_mention",
+          "quotes_removed": true,
+          "full_text": "My choice: \n \n Queen \n - EMI CDP 7 46204 2 \n \n Queen II \n - Not satisfied with any CD release of this album. \n The original has some mastering errors, the 94 remaster suffers from noise reduction and the latest one is peak limited. If I had to choose, it'd be the original CDP. \n \n Sheer Heart Attack \n - EMI CDP 7 46206 2 \n \n A Night At The Opera \n - DCC Compact Classics GZS-1144 \n - MFSL UDCD 568 \n - EMI CDP 7 46207 2 \n \n A Day At The Races \n - MFSL UDCD 668 \n The original CDP has mastering errors. \n \n News Of The World \n - EMI CDP 7 46209 2 \n Sound better then the MFSL. \n \n Jazz \n - EMI CDP 7 46210 2 \n \n Flash Gordon \n - EMI CDP 7 46214 2 \n \n The Game \n - EMI CDP 7 46213 2 \n Sound so good that there's no need to spend money on the MFSL \n \n Hot Space \n - CDP 7 46215 2 \n \n The Works \n - EMI CDP 7 46016 2 \n \n A Kind Of Magic \n - EMI CDP 7 46267 2 \n \n The Miracle \n - Parlophone CDP 79 2357 2 \n \n Innuendo \n - Parlophone CDP 79 5887 2 \n \n Made In Heaven \n - Parlophone 7243 8 36088 2 9",
+          "album_context": "Jazz - EMI CDP 7 46210 2",
+          "album_context_complete": false,
+          "context_album": "Jazz",
+          "quoted_context": [],
+          "previous_post_id": "post-17308617",
+          "posts_omitted": false,
+          "context_parser_version": 7
+        }
+      ]
+    },
+    {
+      "query": {
+        "text": "",
+        "artist": "Pink Floyd",
+        "title": "The Wall",
+        "release_type": "album"
+      },
+      "source_id": "forum:75ecd9df459bc027209a",
+      "target_literal": "West German Harvest black face mastering",
+      "expected_preference": true,
+      "sources": [
+        {
+          "source_id": "forum:75ecd9df459bc027209a",
+          "url": "https://forums.stevehoffman.tv/threads/the-wall-canadian-cd-columbia-c2k-36183-and-pre-emphasis.743388/#post-18542928",
+          "author": "winders",
+          "date": "",
+          "excerpt": "I gave up on the West German Harvest black face order from Macedonia and asked for and received a refund. I then bought this disc set from a seller in Germany and had to here in California in 7 days. Note: US buyers should not order from Eastern Europe unless you are prepared to wait a long time and possibly not receive the order at all.",
+          "page_title": "\"The Wall\" Canadian CD Columbia C2K 36183 and Pre-Emphasis | Steve Hoffman Music Forums",
+          "context_complete": false,
+          "context_scope": "unquoted_post_excerpt",
+          "discussion_complete": false,
+          "context_limitations": [
+            "post_units_omitted"
+          ],
+          "page_status": "FOUND",
+          "scope": "post_excerpt",
+          "post_id": "post-18542928",
+          "album_relevance": "thread_context",
+          "quotes_removed": true,
+          "full_text": "I gave up on the West German Harvest black face order from Macedonia and asked for and received a refund. I then bought this disc set from a seller in Germany and had to here in California in 7 days. Note: US buyers should not order from Eastern Europe unless you are prepared to wait a long time and possibly not receive the order at all. \n \n I used SoX to de-emphasize the tracks from the Canadian version (C2K-36183) of the original Sony Japan mastering and compared it to both the \"Shine On\" mastering and the West German Harvest black face mastering. All three sound good, but I definitely prefer the West German Harvest black face mastering. It is more natural sounding and has better dynamics than the other two.",
+          "album_context": "I gave up on the West German Harvest black face order from Macedonia and asked for and received a refund. I then bought this disc set from a seller in Germany and had to here in California in 7 days. Note: US buyers should not order from Eastern Europe unless you are prepared to wait a long time and possibly not receive the order at all. I used SoX to de-emphasize the tracks from the Canadian version (C2K-36183) of the original Sony Japan mastering and compared it to both the \"Shine On\" mastering and the West German Harvest black face mastering. All three sound good, but I definitely prefer the West German Harvest black face mastering. It is more natural sounding and has better dynamics than the other two.",
+          "album_context_complete": true,
+          "context_album": "The Wall",
+          "quoted_context": [],
+          "previous_post_id": "post-18435521",
+          "posts_omitted": false,
+          "context_parser_version": 7
+        },
+        {
+          "source_id": "forum:7e80abb247dff9a23e39",
+          "url": "https://forums.stevehoffman.tv/threads/the-wall-canadian-cd-columbia-c2k-36183-and-pre-emphasis.743388/#post-18428823",
+          "author": "winders",
+          "date": "",
+          "excerpt": "Folks, I have what the Pink Floyd Archives would call the Canadian \"Columbia Records 3rd issue\". Here is the link: Pink Floyd Archives-Canadian CD Discography The CDs labels are back as shown here: I wanted to rip these CDs to play on my Roon-based 2 channel setup in my home. Pink Floyd Archives-Japanese Pink Floyd CD Discography Thanks!",
+          "page_title": "\"The Wall\" Canadian CD Columbia C2K 36183 and Pre-Emphasis | Steve Hoffman Music Forums",
+          "context_complete": false,
+          "context_scope": "unquoted_post_excerpt",
+          "discussion_complete": false,
+          "context_limitations": [
+            "post_units_omitted"
+          ],
+          "page_status": "FOUND",
+          "scope": "post_excerpt",
+          "post_id": "post-18428823",
+          "album_relevance": "thread_context",
+          "quotes_removed": true,
+          "full_text": "Folks, I have what the Pink Floyd Archives would call the Canadian \"Columbia Records 3rd issue\". Here is the link: \n \n Pink Floyd Archives-Canadian CD Discography \n \n The CDs labels are back as shown here: \n \n \n \n I wanted to rip these CDs to play on my Roon-based 2 channel setup in my home. \n \n My issue is that both the latest version of EAC and the \"drutil\" in macOS High Sierra show the tracks having pre-emphasis according to the TOC of the disks. The Pink Floyd Archives do not show this CD as having pre-emphasis. Other \"The Wall\" CDs known to have pre-emphasis are listed as having it. See here: \n \n Pink Floyd Archives-Japanese Pink Floyd CD Discography \n \n So, I sent en email off to Vernon at the Pink Floyd Archives noting that I thought his data may be incorrect on the above CDs. He wrote back telling me that the EAC was wrong. At the time of my writing him, I had not use the \"drutil\" in macOS to check for pre-emphasis. So that information was not included. I have since followed up but have not heard back yet. \n \n So, does this Canadian release of \"The Wall\" actually have pre-emphasis as the CDs TOC indicate or is the TOC in error? \n \n Thanks!",
+          "album_context": "Folks, I have what the Pink Floyd Archives would call the Canadian \"Columbia Records 3rd issue\". Here is the link: Pink Floyd Archives-Canadian CD Discography The CDs labels are back as shown here: I wanted to rip these CDs to play on my Roon-based 2 channel setup in my home. My issue is that both the latest version of EAC and the \"drutil\" in macOS High Sierra show the tracks having pre-emphasis according to the TOC of the disks. The Pink Floyd Archives do not show this CD as having pre-emphasis. Other \"The Wall\" CDs known to have pre-emphasis are listed as having it. See here: Pink Floyd Archives-Japanese Pink Floyd CD Discography So, I sent en email off to Vernon at the Pink Floyd Archives noting that I thought his data may be incorrect on the above CDs. He wrote back telling me that the EAC was wrong. At the time of my writing him, I had not use the \"drutil\" in macOS to check for pre-emphasis. So that information was not included. I have since followed up but have not heard back yet. So, does this Canadian release of \"The Wall\" actually have pre-emphasis as the CDs TOC indicate or is the TOC in error? Thanks!",
+          "album_context_complete": true,
+          "context_album": "The Wall",
+          "quoted_context": [],
+          "previous_post_id": "",
+          "posts_omitted": false,
+          "context_parser_version": 7
+        },
+        {
+          "source_id": "forum:804f21912d932045ec02",
+          "url": "https://forums.stevehoffman.tv/threads/the-wall-canadian-cd-columbia-c2k-36183-and-pre-emphasis.743388/#post-18429796",
+          "author": "winders",
+          "date": "",
+          "excerpt": "The peak levels reported by EAC on the CDs I have are exactly the same as those reported at the Pink Floyd Archive link: Track Peak Levels: I used the “drutil” utility in macOS to query the TOC for both “The Wall” CD’s. Here is what I got back for the two discs: Discs that don't have pre-emphasis say \"no pre-emphasis\" instead of \"with pre-emphasis\".",
+          "page_title": "\"The Wall\" Canadian CD Columbia C2K 36183 and Pre-Emphasis | Steve Hoffman Music Forums",
+          "context_complete": false,
+          "context_scope": "unquoted_post_excerpt",
+          "discussion_complete": false,
+          "context_limitations": [
+            "post_units_omitted"
+          ],
+          "page_status": "FOUND",
+          "scope": "post_excerpt",
+          "post_id": "post-18429796",
+          "album_relevance": "thread_context",
+          "quotes_removed": true,
+          "full_text": "The peak levels reported by EAC on the CDs I have are exactly the same as those reported at the Pink Floyd Archive link: \n \n Track Peak Levels: \n \n Disc 1: 94.6 / 76.9 / 85.4 / 97.7 / 81.3 / 97.7 / 46.9 / 59.5 / 97.7 / 97.7 / 84.2 / 97.7 / 24.9 \n Disc 2: 83.5 / 61.9 / 71.1 / 43.6 / 97.7 / 92.8 / 71.0 / 97.7 / 97.7 / 92.7 / 97.7 / 77.4 / 15.3 \n \n I used the “drutil” utility in macOS to query the TOC for both “The Wall” CD’s. Here is what I got back for the two discs: \n \n First session: 1 \n Last session: 1 \n First track: 1 \n Disc type: 0 (CD-DA, or CD-ROM with first track in Mode 1) \n Last track: 13 \n Lead-out: 39:20.60 \n Session 1, Track 1: 00:02.00 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 2: 03:21.07 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 3: 05:50.52 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 4: 09:01.27 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 5: 10:52.62 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 6: 14:53.37 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 7: 20:27.55 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 8: 23:16.65 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 9: 25:24.45 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 10: 28:57.22 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 11: 32:32.25 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 12: 36:48.27 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 13: 38:06.07 2ch audio, with pre-emphasis, digital copy prohibited \n \n First session: 1 \n Last session: 1 \n First track: 1 \n Disc type: 0 (CD-DA, or CD-ROM with first track in Mode 1) \n Last track: 13 \n Lead-out: 42:02.17 \n Session 1, Track 1: 00:02.00 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 2: 04:42.30 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 3: 07:40.25 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 4: 10:51.72 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 5: 12:21.60 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 6: 13:48.25 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 7: 20:12.45 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 8: 21:48.50 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 9: 26:04.52 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 10: 30:23.67 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 11: 34:26.52 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 12: 34:58.20 2ch audio, with pre-emphasis, digital copy prohibited \n Session 1, Track 13: 40:17.40 2ch audio, with pre-emphasis, digital copy prohibited \n \n Discs that don't have pre-emphasis say \"no pre-emphasis\" instead of \"with pre-emphasis\". \n \n I want to say that when I listen to this release of \"The Wall\" ripped through Roon, I don't think I hear an emphasized upper range. This is the only CD release I have that is said to have pre-emphasis so I don't know how dramatic the difference would be. Nor do I have a CD player that would indicate if the CD it was playing had pre-emphasis. \n \n I am thinking the TOC is wrong. Is there any other way to check for pre-emphasis?",
+          "album_context": "The peak levels reported by EAC on the CDs I have are exactly the same as those reported at the Pink Floyd Archive link: Track Peak Levels: Disc 1: 94.6 / 76.9 / 85.4 / 97.7 / 81.3 / 97.7 / 46.9 / 59.5 / 97.7 / 97.7 / 84.2 / 97.7 / 24.9 Disc 2: 83.5 / 61.9 / 71.1 / 43.6 / 97.7 / 92.8 / 71.0 / 97.7 / 97.7 / 92.7 / 97.7 / 77.4 / 15.3 I used the “drutil” utility in macOS to query the TOC for both “The Wall” CD’s. Here is what I got back for the two discs: First session: 1 Last session: 1 First track: 1 Disc type: 0 (CD-DA, or CD-ROM with first track in Mode 1) Last track: 13 Lead-out: 39:20.60 Session 1, Track 1: 00:02.00 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 2: 03:21.07 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 3: 05:50.52 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 4: 09:01.27 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 5: 10:52.62 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 6: 14:53.37 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 7: 20:27.55 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 8: 23:16.65 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 9: 25:24.45 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 10: 28:57.22 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 11: 32:32.25 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 12: 36:48.27 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 13: 38:06.07 2ch audio, with pre-emphasis, digital copy prohibited First session: 1 Last session: 1 First track: 1 Disc type: 0 (CD-DA, or CD-ROM with first track in Mode 1) Last track: 13 Lead-out: 42:02.17 Session 1, Track 1: 00:02.00 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 2: 04:42.30 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 3: 07:40.25 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 4: 10:51.72 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 5: 12:21.60 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 6: 13:48.25 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 7: 20:12.45 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 8: 21:48.50 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 9: 26:04.52 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 10: 30:23.67 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 11: 34:26.52 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 12: 34:58.20 2ch audio, with pre-emphasis, digital copy prohibited Session 1, Track 13: 40:17.40 2ch audio, with pre-emphasis, digital copy prohibited Discs that don't have pre-emphasis say \"no pre-emphasis\" instead of \"with pre-emphasis\". I want to say that when I listen to this release of \"The Wall\" ripped through Roon, I don't think I hear an emphasized upper range. This is the only CD release I have that is said to have pre-emphasis so I don't know how dramatic the difference would be. Nor do I have a CD player that would indicate if the CD it was playing had pre-emphasis. I am thinking the TOC is wrong. Is there any other way to check for pre-emphasis?",
+          "album_context_complete": true,
+          "context_album": "The Wall",
+          "quoted_context": [],
+          "previous_post_id": "post-18429314",
+          "posts_omitted": false,
+          "context_parser_version": 7
+        }
+      ]
+    },
+    {
+      "query": {
+        "text": "",
+        "artist": "The Beatles",
+        "title": "Abbey Road",
+        "release_type": "album"
+      },
+      "source_id": "forum:ff9d12a9b5f1929cb83d",
+      "target_literal": "BT",
+      "expected_preference": true,
+      "sources": [
+        {
+          "source_id": "forum:ff9d12a9b5f1929cb83d",
+          "url": "https://forums.stevehoffman.tv/threads/which-is-the-best-sounding-abbey-road-cd.193566/#post-4759897",
+          "author": "Randy W",
+          "date": "",
+          "excerpt": "To me (on my system and in my listening room) the BT is much more relaxed sounding than the 2009. It is also \"crankable\", meaning it is not compressed in the least - it remains sonically superior at louder listening levels compared to the 2009. This is my major problem with the stereo remasters in general. Wouldn't want to be without it personally.",
+          "page_title": "Which is the best-sounding Abbey Road CD? | Steve Hoffman Music Forums",
+          "context_complete": false,
+          "context_scope": "unquoted_post_excerpt",
+          "discussion_complete": false,
+          "context_limitations": [
+            "post_units_omitted"
+          ],
+          "page_status": "FOUND",
+          "scope": "post_excerpt",
+          "post_id": "post-4759897",
+          "album_relevance": "thread_context",
+          "quotes_removed": true,
+          "full_text": "To me (on my system and in my listening room) the BT is much more relaxed sounding than the 2009. It is also \"crankable\", meaning it is not compressed in the least - it remains sonically superior at louder listening levels compared to the 2009. This is my major problem with the stereo remasters in general. The BT is not hyper detailed, but all the details on the 2009 are there - just subtler and more integrated into the mix. Wouldn't want to be without it personally.",
+          "album_context": "To me (on my system and in my listening room) the BT is much more relaxed sounding than the 2009. It is also \"crankable\", meaning it is not compressed in the least - it remains sonically superior at louder listening levels compared to the 2009. This is my major problem with the stereo remasters in general. The BT is not hyper detailed, but all the details on the 2009 are there - just subtler and more integrated into the mix. Wouldn't want to be without it personally.",
+          "album_context_complete": true,
+          "context_album": "Abbey Road",
+          "quoted_context": [],
+          "previous_post_id": "post-4759861",
+          "posts_omitted": false,
+          "context_parser_version": 7
+        },
+        {
+          "source_id": "forum:f6bf777f98cc56fcd9f7",
+          "url": "https://forums.stevehoffman.tv/threads/which-is-the-best-sounding-abbey-road-cd.193566/page-2#post-4760241",
+          "author": "Randy W",
+          "date": "",
+          "excerpt": "This is a very interesting point. Probably only applies to the Abbey Road BT and a couple of other pre-2009 redbook Beatles CDs that sound good, but it is food for thought.",
+          "page_title": "Which is the best-sounding Abbey Road CD? | Page 2 | Steve Hoffman Music Forums",
+          "context_complete": true,
+          "context_scope": "unquoted_post_excerpt",
+          "discussion_complete": false,
+          "context_limitations": [],
+          "page_status": "FOUND",
+          "scope": "post_excerpt",
+          "post_id": "post-4760241",
+          "album_relevance": "thread_context",
+          "quotes_removed": true,
+          "full_text": "This is a very interesting point. Probably only applies to the Abbey Road BT and a couple of other pre-2009 redbook Beatles CDs that sound good, but it is food for thought.",
+          "album_context": "This is a very interesting point. Probably only applies to the Abbey Road BT and a couple of other pre-2009 redbook Beatles CDs that sound good, but it is food for thought.",
+          "album_context_complete": true,
+          "context_album": "Abbey Road",
+          "quoted_context": [
+            {
+              "text": "Gary Freed said: ↑ I remember when some of the Steely Dan  - Aja remasters came out a few years back. or was it a decade ago., that a number of our own forum members weighed in immediately that it was an improvement over the early 1980's versions. This particular comparison of the Black Triangle and the 2009 Remaster remind me of that debate which took a while to sort out. Click to expand...",
+              "url": "",
+              "attribution": ""
+            }
+          ],
+          "previous_post_id": "post-4760239",
+          "posts_omitted": false,
+          "context_parser_version": 7
+        }
+      ]
+    },
+    {
+      "query": {
+        "text": "",
+        "artist": "The Beatles",
+        "title": "Abbey Road",
+        "release_type": "album"
+      },
+      "source_id": "forum:8c9e0b0a38dd6bdaf2fd",
+      "target_literal": "2009",
+      "expected_preference": true,
+      "sources": [
+        {
+          "source_id": "forum:8c9e0b0a38dd6bdaf2fd",
+          "url": "https://forums.stevehoffman.tv/threads/which-is-the-best-sounding-abbey-road-cd.193566/page-2#post-4760832",
+          "author": "LesPaul666",
+          "date": "",
+          "excerpt": "At least that many, I'm sure. I own The 1983 Black Triangle, the 1987 EMI , and the new 2009 Remaster, and voted for the 2009 version, as the best overall.",
+          "page_title": "Which is the best-sounding Abbey Road CD? | Page 2 | Steve Hoffman Music Forums",
+          "context_complete": true,
+          "context_scope": "unquoted_post_excerpt",
+          "discussion_complete": false,
+          "context_limitations": [],
+          "page_status": "FOUND",
+          "scope": "post_excerpt",
+          "post_id": "post-4760832",
+          "album_relevance": "thread_context",
+          "quotes_removed": true,
+          "full_text": "At least that many, I'm sure. \n \n I own The 1983 Black Triangle, the 1987 EMI , and the new 2009 Remaster, and voted for the 2009 version, as the best overall.",
+          "album_context": "At least that many, I'm sure. I own The 1983 Black Triangle, the 1987 EMI , and the new 2009 Remaster, and voted for the 2009 version, as the best overall.",
+          "album_context_complete": true,
+          "context_album": "Abbey Road",
+          "quoted_context": [
+            {
+              "text": "PlusMinus said: ↑ Wow, over 100 people own and have compared all three masterings? Click to expand...",
+              "url": "",
+              "attribution": ""
+            }
+          ],
+          "previous_post_id": "post-4760789",
+          "posts_omitted": false,
+          "context_parser_version": 7
+        },
+        {
+          "source_id": "forum:f6bf777f98cc56fcd9f7",
+          "url": "https://forums.stevehoffman.tv/threads/which-is-the-best-sounding-abbey-road-cd.193566/page-2#post-4760241",
+          "author": "Randy W",
+          "date": "",
+          "excerpt": "This is a very interesting point. Probably only applies to the Abbey Road BT and a couple of other pre-2009 redbook Beatles CDs that sound good, but it is food for thought.",
+          "page_title": "Which is the best-sounding Abbey Road CD? | Page 2 | Steve Hoffman Music Forums",
+          "context_complete": true,
+          "context_scope": "unquoted_post_excerpt",
+          "discussion_complete": false,
+          "context_limitations": [],
+          "page_status": "FOUND",
+          "scope": "post_excerpt",
+          "post_id": "post-4760241",
+          "album_relevance": "thread_context",
+          "quotes_removed": true,
+          "full_text": "This is a very interesting point. Probably only applies to the Abbey Road BT and a couple of other pre-2009 redbook Beatles CDs that sound good, but it is food for thought.",
+          "album_context": "This is a very interesting point. Probably only applies to the Abbey Road BT and a couple of other pre-2009 redbook Beatles CDs that sound good, but it is food for thought.",
+          "album_context_complete": true,
+          "context_album": "Abbey Road",
+          "quoted_context": [
+            {
+              "text": "Gary Freed said: ↑ I remember when some of the Steely Dan  - Aja remasters came out a few years back. or was it a decade ago., that a number of our own forum members weighed in immediately that it was an improvement over the early 1980's versions. This particular comparison of the Black Triangle and the 2009 Remaster remind me of that debate which took a while to sort out. Click to expand...",
+              "url": "",
+              "attribution": ""
+            }
+          ],
+          "previous_post_id": "post-4760239",
+          "posts_omitted": false,
+          "context_parser_version": 7
+        }
+      ]
+    },
+    {
+      "query": {
+        "text": "",
+        "artist": "Steely Dan",
+        "title": "Gaucho",
+        "release_type": "album"
+      },
+      "source_id": "forum:d9b65b87cb6938dd8639",
+      "target_literal": "SHM-SACD",
+      "expected_preference": true,
+      "sources": [
+        {
+          "source_id": "forum:d9b65b87cb6938dd8639",
+          "url": "https://forums.stevehoffman.tv/threads/steely-dan-cds-different-masterings-gaucho.162562/page-3#post-10134375",
+          "author": "coffeecupman",
+          "date": "",
+          "excerpt": "The SACD is great. The SHM-SACD is a unique mastering to that, and even better. I have shot out the SHM-SACD vs the MFSL. The MFSL sounds dull in comparison. The SHM-SACD is more detailed without being harsh. Expensive, though. ccm",
+          "page_title": "Steely Dan CDs Different Masterings: Gaucho | Page 3 | Steve Hoffman Music Forums",
+          "context_complete": true,
+          "context_scope": "unquoted_post_excerpt",
+          "discussion_complete": false,
+          "context_limitations": [],
+          "page_status": "FOUND",
+          "scope": "post_excerpt",
+          "post_id": "post-10134375",
+          "album_relevance": "thread_context",
+          "quotes_removed": true,
+          "full_text": "The SACD is great. \n \n The SHM-SACD is a unique mastering to that, and even better. \n \n I have shot out the SHM-SACD vs the MFSL. The MFSL sounds dull in comparison. The SHM-SACD is more detailed without being harsh. \n \n Expensive, though. \n \n ccm",
+          "album_context": "The SACD is great. The SHM-SACD is a unique mastering to that, and even better. I have shot out the SHM-SACD vs the MFSL. The MFSL sounds dull in comparison. The SHM-SACD is more detailed without being harsh. Expensive, though. ccm",
+          "album_context_complete": true,
+          "context_album": "Gaucho",
+          "quoted_context": [
+            {
+              "text": "SOONERFAN said: ↑ So what is the best mastering for this title?  I have a Japan for US coming soon.  Will this one do? Click to expand...",
+              "url": "",
+              "attribution": ""
+            }
+          ],
+          "previous_post_id": "post-10134354",
+          "posts_omitted": false,
+          "context_parser_version": 7
+        }
+      ]
+    },
+    {
+      "query": {
+        "text": "",
+        "artist": "Steely Dan",
+        "title": "Gaucho",
+        "release_type": "album"
+      },
+      "source_id": "forum:2f3728941051d8729747",
+      "target_literal": "Japan for the US",
+      "expected_preference": true,
+      "sources": [
+        {
+          "source_id": "forum:2f3728941051d8729747",
+          "url": "https://forums.stevehoffman.tv/threads/steely-dan-cds-different-masterings-gaucho.162562/page-3#post-8106294",
+          "author": "Evan",
+          "date": "",
+          "excerpt": "I have mastering #8, Japan for the US and the MFSL Gold CD. I prefer the Japan for the US. It just sounds better than the MFSL.",
+          "page_title": "Steely Dan CDs Different Masterings: Gaucho | Page 3 | Steve Hoffman Music Forums",
+          "context_complete": true,
+          "context_scope": "unquoted_post_excerpt",
+          "discussion_complete": false,
+          "context_limitations": [],
+          "page_status": "FOUND",
+          "scope": "post_excerpt",
+          "post_id": "post-8106294",
+          "album_relevance": "thread_context",
+          "quotes_removed": true,
+          "full_text": "I have mastering #8, Japan for the US and the MFSL Gold CD. I prefer the Japan for the US. It just sounds better than the MFSL.",
+          "album_context": "I have mastering #8, Japan for the US and the MFSL Gold CD. I prefer the Japan for the US. It just sounds better than the MFSL.",
+          "album_context_complete": true,
+          "context_album": "Gaucho",
+          "quoted_context": [],
+          "previous_post_id": "post-8105148",
+          "posts_omitted": false,
+          "context_parser_version": 7
+        }
+      ]
+    },
+    {
+      "query": {
+        "text": "",
+        "artist": "Steely Dan",
+        "title": "Gaucho",
+        "release_type": "album"
+      },
+      "source_id": "forum:9f0dc3dde036fa3c3925",
+      "target_literal": "VDP-26",
+      "expected_preference": true,
+      "sources": [
+        {
+          "source_id": "forum:9f0dc3dde036fa3c3925",
+          "url": "https://forums.stevehoffman.tv/threads/steely-dan-cds-different-masterings-gaucho.162562/page-3#post-10668365",
+          "author": "Tony L",
+          "date": "",
+          "excerpt": "I found a copy of VDP-26 a couple of weeks ago and it sounds wonderful to my ears; balanced, detailed, punchy and lacking even the slightest hint of digital glare. The only CD I've compared it to is a nice early Austrian pressing which I liked a lot, but VDP-26 is better.",
+          "page_title": "Steely Dan CDs Different Masterings: Gaucho | Page 3 | Steve Hoffman Music Forums",
+          "context_complete": true,
+          "context_scope": "unquoted_post_excerpt",
+          "discussion_complete": false,
+          "context_limitations": [],
+          "page_status": "FOUND",
+          "scope": "post_excerpt",
+          "post_id": "post-10668365",
+          "album_relevance": "thread_context",
+          "quotes_removed": true,
+          "full_text": "I found a copy of VDP-26 a couple of weeks ago and it sounds wonderful to my ears; balanced, detailed, punchy and lacking even the slightest hint of digital glare. The only CD I've compared it to is a nice early Austrian pressing which I liked a lot, but VDP-26 is better.",
+          "album_context": "I found a copy of VDP-26 a couple of weeks ago and it sounds wonderful to my ears; balanced, detailed, punchy and lacking even the slightest hint of digital glare. The only CD I've compared it to is a nice early Austrian pressing which I liked a lot, but VDP-26 is better.",
+          "album_context_complete": true,
+          "context_album": "Gaucho",
+          "quoted_context": [],
+          "previous_post_id": "post-10667812",
+          "posts_omitted": false,
+          "context_parser_version": 7
+        }
+      ]
+    },
+    {
+      "query": {
+        "text": "",
+        "artist": "Led Zeppelin",
+        "title": "Led Zeppelin II",
+        "release_type": "album"
+      },
+      "source_id": "forum:fca4221fe7e6981baa42",
+      "target_literal": "Diament mastering",
+      "expected_preference": false,
+      "sources": [
+        {
+          "source_id": "forum:fca4221fe7e6981baa42",
+          "url": "https://forums.stevehoffman.tv/threads/led-zeppelin-ii-1988-technidisc-cd-with-different-mastering.768690/page-3#post-19310403",
+          "author": "hvbias",
+          "date": "",
+          "excerpt": "Listen to the Davis remaster if you are able to. I am personally not a fan of it, but many people are. The Diament mastering is the one that sounds incredibly close to the RL cut record, I made a needle drop of my RL 1A/1A LP to compare with my friends and hosted a sample here at one point.",
+          "page_title": "Led Zeppelin II - 1988 Technidisc CD with Different Mastering | Page 3 | Steve Hoffman Music Forums",
+          "context_complete": true,
+          "context_scope": "unquoted_post_excerpt",
+          "discussion_complete": false,
+          "context_limitations": [],
+          "page_status": "FOUND",
+          "scope": "post_excerpt",
+          "post_id": "post-19310403",
+          "album_relevance": "thread_context",
+          "quotes_removed": true,
+          "full_text": "Listen to the Davis remaster if you are able to. I am personally not a fan of it, but many people are. The Diament mastering is the one that sounds incredibly close to the RL cut record, I made a needle drop of my RL 1A/1A LP to compare with my friends and hosted a sample here at one point.",
+          "album_context": "Listen to the Davis remaster if you are able to. I am personally not a fan of it, but many people are. The Diament mastering is the one that sounds incredibly close to the RL cut record, I made a needle drop of my RL 1A/1A LP to compare with my friends and hosted a sample here at one point.",
+          "album_context_complete": true,
+          "context_album": "Led Zeppelin II",
+          "quoted_context": [
+            {
+              "text": "ajawamnet said: ↑ The Mothership remaster is the only one  I have (at least with regard to WLL) that's \"significantly\" different than any others ( various versions of II, Greatest hits/Early Days, etc...) . When I finally convinced myself to put the time into remixing it, I really thought that there may be a better version out there that'd make anything I did redundant. At the time - I didn't find any better sounding version. That's what kinda peaked my interest in seeing this thread. Click to expand...",
+              "url": "",
+              "attribution": ""
+            }
+          ],
+          "previous_post_id": "post-19308192",
+          "posts_omitted": false,
+          "context_parser_version": 7
+        }
+      ]
+    }
+  ]
+}

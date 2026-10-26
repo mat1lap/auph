@@ -134,8 +134,8 @@ def _sync_text_matches_plain(synced: str, plain: str) -> bool:
     """
     sync_text = normalize_lookup(lrc_to_plain(synced))
     plain_text = normalize_lookup(plain)
-    if len(plain_text) < 40:
-        return True
+    if not plain_text or not sync_text:
+        return False
     if len(sync_text) < 40 and len(plain_text) >= 80:
         return False
     length_ratio = max(len(sync_text), len(plain_text)) / max(1, min(len(sync_text), len(plain_text)))
@@ -165,7 +165,7 @@ def inspect_local(base: Path, embedded: Mapping[str, Sequence[str]] | None, dura
         except (OSError, UnicodeError) as exc:
             errors.append(f"{path.name}: {exc}")
             continue
-        valid = len(text) >= 20
+        valid = bool(display_lyrics(text).strip())
         if kind in {"synced", "enhanced", "romanization_lrc"}:
             valid, why = validate_lrc(text, duration=duration)
             if not valid:
@@ -193,7 +193,7 @@ def inspect_local(base: Path, embedded: Mapping[str, Sequence[str]] | None, dura
     for field in ("UNSYNCEDLYRICS", "LYRICS"):
         for value in embedded.get(field, []):
             text = conservative_text(value)
-            if len(text.strip()) >= 10:
+            if display_lyrics(text).strip():
                 embedded_valid = True
             if "[" in text and validate_lrc(text, duration=duration)[0]:
                 embedded_synced = True
@@ -205,14 +205,21 @@ def inspect_local(base: Path, embedded: Mapping[str, Sequence[str]] | None, dura
         if validate_lrc(value, duration=duration)[0]:
             embedded_valid = True
             embedded_synced = True
-            local_word_sync = local_word_sync or bool(WORD_TIMESTAMP_RE.search(value))
+            local_word_sync = local_word_sync or (
+                bool(WORD_TIMESTAMP_RE.search(value)) and validate_enhanced_lrc(value, duration=duration)[0]
+            )
     for value in embedded.get("SYNCEDLYRICS", []):
-        local_word_sync = local_word_sync or bool(WORD_TIMESTAMP_RE.search(value))
+        local_word_sync = local_word_sync or (
+            bool(WORD_TIMESTAMP_RE.search(value)) and validate_enhanced_lrc(value, duration=duration)[0]
+        )
     for field in ("SYNCEDLYRICS_ENHANCED", "LYRICS_TTML"):
         for value in embedded.get(field, []):
             if WORD_TIMESTAMP_RE.search(value):
                 valid_word_sync, _ = validate_enhanced_lrc(value, duration=duration)
                 local_word_sync = local_word_sync or valid_word_sync
+                if valid_word_sync:
+                    embedded_valid = True
+                    embedded_synced = True
             elif field == "LYRICS_TTML" and _valid_ttml(value):
                 embedded_valid = True
                 has_timing, has_words = _local_ttml_timing(value, duration)
@@ -685,8 +692,37 @@ def materialize_embedded(
             key = ("synced" if synchronized else "plain") if form == "original" else form
             # Malformed timing remains archived, but is never reintroduced as
             # plain playback text through a failed synchronization conversion.
-            if synchronized or (not looks_timed and len(value.strip()) >= 10):
+            if synchronized or (not looks_timed and bool(display_lyrics(value).strip())):
                 outputs.setdefault(key, destination)
+    for field, kind, extension in (
+        ("SYNCEDLYRICS_ENHANCED", "enhanced", ".elrc"),
+        ("LYRICS_TTML", "ttml", ".ttml"),
+    ):
+        for value in embedded.get(field, ()):
+            if not value:
+                continue
+            if len(value) > MAX_LYRICS_CHARS:
+                raise ValueError("embedded lyrics exceed archival safety limit")
+            valid = validate_enhanced_lrc(value, duration=duration)[0] if kind == "enhanced" else _valid_ttml(value)
+            wanted = base.with_suffix(extension if valid else extension + ".raw")
+            destination = _safe_path(wanted, "embedded", value, existing_path=existing_base.parent / wanted.name)
+            if not destination.exists():
+                destination.write_text(value, encoding="utf-8", newline="")
+            if not valid:
+                continue
+            outputs.setdefault(kind, destination)
+            if kind == "enhanced":
+                line, plain = enhanced_to_lrc(value), lrc_to_plain(value)
+            else:
+                from lyrics_utils import parse_ttml
+
+                plain, enhanced, _words, _background = parse_ttml(value)
+                line = enhanced_to_lrc(enhanced) if enhanced else ""
+            derived = materialize_embedded(
+                base, {"LYRICS": [plain], "SYNCEDLYRICS": [line]}, existing_base=existing_base, duration=duration
+            )
+            for key, path in derived.items():
+                outputs.setdefault(key, path)
     return outputs
 
 

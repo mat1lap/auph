@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from mutagen import MutagenError
 from mutagen.flac import FLAC
 
+from library_files import is_pipeline_private
 from library_layout import position_evidence
+from mb_discid_from_cue import cue_disc_number, parse_cue
 
 
 @dataclass(frozen=True)
@@ -44,7 +46,7 @@ def assess_album_completeness(
     if not flac_files:
         return CompletenessDecision("UNKNOWN", ("no local audio tracks",))
     positions: dict[int, set[int]] = {}
-    disc_file_stems: dict[int, set[str]] = {}
+    disc_files: dict[int, set[Path]] = {}
     totals: dict[int, set[int]] = {}
     disc_totals: set[int] = set()
     identities: set[tuple[str, str]] = set()
@@ -66,7 +68,7 @@ def assess_album_completeness(
             if track in positions.setdefault(disc, set()):
                 return CompletenessDecision("INCOMPLETE", (f"duplicate disc {disc} track {track}",))
             positions[disc].add(track)
-            disc_file_stems.setdefault(disc, set()).add(path.stem.casefold())
+            disc_files.setdefault(disc, set()).add(path.resolve())
             for field in ("TOTALTRACKS", "TRACKTOTAL"):
                 for value in audio.get(field, []):
                     track_total = _number(value)
@@ -77,7 +79,7 @@ def assess_album_completeness(
                     disc_total = _number(value)
                     if disc_total:
                         disc_totals.add(disc_total)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, MutagenError) as exc:
         return CompletenessDecision("UNKNOWN", (f"unreadable local tags: {exc}",))
 
     if any(not album or not artist for album, artist in identities):
@@ -96,24 +98,36 @@ def assess_album_completeness(
         return CompletenessDecision("INCOMPLETE", ("missing or inconsistent disc numbering",))
 
     cue_counts: dict[int, int] = {}
-    cues = sorted(folder.glob("*.cue"))
+    cues = sorted(
+        path
+        for path in folder.rglob("*")
+        if path.suffix.casefold() == ".cue"
+        and path.is_file()
+        and not path.is_symlink()
+        and not is_pipeline_private(path, root=folder)
+    )
     for cue in cues:
-        content = cue.read_text(encoding="utf-8-sig", errors="replace")
-        named_files = re.findall(r'(?im)^\s*FILE\s+"?(.+?\.(?:flac|wav|aiff?))"?\s+\w+', content)
-        tracks = [int(number) for number in re.findall(r"(?im)^\s*TRACK\s+(\d+)\s+AUDIO\b", content)]
-        if not tracks:
+        try:
+            rows = parse_cue(cue, require_indexes=False)
+            disc = cue_disc_number(cue, folder, single_cue=len(cues) == 1)
+        except (OSError, ValueError, MutagenError):
             continue
-        disc_match = re.search(r"(?i)(?:disc|cd)[ _.-]*(\d+)", cue.stem)
-        disc = int(disc_match.group(1)) if disc_match else (1 if len(cues) == 1 else 0)
-        cue_stems = {Path(name).stem.casefold() for name in named_files}
+        tracks = [row["number"] for row in rows]
+        named_files = [row["file"] for row in rows if row.get("file")]
+        references = {cue.parent / str(name).replace("\\", "/") for name in named_files}
+        if any(path.is_symlink() for path in references):
+            continue
+        cue_files = {
+            (path if path.suffix.casefold() == ".flac" else path.with_suffix(".flac")).resolve() for path in references
+        }
         # Only a per-track CUE that names every local FLAC on this disc can
         # corroborate a total. A free-floating TRACK list, or a CUE for one
         # image file, cannot establish completeness of separate local files.
         if (
             disc
-            and len(named_files) == len(tracks) == len(cue_stems) == len(disc_file_stems.get(disc, set()))
+            and len(named_files) == len(tracks) == len(cue_files) == len(disc_files.get(disc, set()))
             and tracks == list(range(1, len(tracks) + 1))
-            and cue_stems == disc_file_stems[disc]
+            and cue_files == disc_files[disc]
         ):
             cue_counts[disc] = len(tracks)
     for disc, numbers in sorted(positions.items()):

@@ -65,7 +65,7 @@ import release_match
 from album_completeness import assess_album_completeness
 from album_lock import exclusive_album
 from http_sessions import isolated_worker_session
-from library_files import iter_library_flacs
+from library_files import is_pipeline_private, iter_library_flacs
 from pipeline_config import load_config
 from provider_cache import DISCOGS_LIMITER, MUSICBRAINZ_LIMITER, JsonCache, fetch_json
 
@@ -1710,6 +1710,7 @@ def measure_album_dr14(
                     if str(item.get("name", ""))
                 }
                 album_dr = str(a_dr) if a_dr is not None else ""
+                dr_db_info["measurement_source"] = report_file.name
             else:
                 print(
                     "WARNING: existing DR14 report does not map to every local FLAC; measuring audio instead.",
@@ -1727,6 +1728,7 @@ def measure_album_dr14(
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=max(300, 300 * len(flac_files)),
             )
             if res.returncode:
                 raise RuntimeError(f"dr14_tmeter failed with exit code {res.returncode}")
@@ -1745,11 +1747,13 @@ def measure_album_dr14(
                     if str(item.get("name", ""))
                 }
                 album_dr = str(a_dr) if a_dr is not None else ""
+                dr_db_info["measurement_source"] = "dr14_tmeter"
         except Exception:
             pass
 
     # 3. Native parallel DR14 measurement via dr14_parse if still not resolved
     if not track_map:
+        dr_db_info["measurement_source"] = dr14_parse.DR_ALGORITHM_VERSION
         measured_tracks: dict[str, dict[str, Any]] = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as ex:
             futures = {ex.submit(dr14_parse.measure_audio_file, f): f for f in flac_files}
@@ -1777,8 +1781,8 @@ def measure_album_dr14(
             try:
                 report_tracks = [measured_tracks[str(f.relative_to(folder))] for f in flac_files]
                 rep_text = dr14_parse.generate_dr14_report(
-                    artist=folder.parent.name if folder.parent != folder else "",
-                    album=folder.name,
+                    artist=artist or (folder.parent.name if folder.parent != folder else ""),
+                    album=album or folder.name,
                     tracks=report_tracks,
                     album_dr=album_dr,
                 )
@@ -1825,6 +1829,35 @@ def measure_album_dr14(
     return track_map, album_dr, dr_db_info
 
 
+def rip_evidence_for_disc(
+    paths: list[Path], folder: Path, disc: int, tocs: Mapping[int, Mapping[str, Any]], total_discs: int
+) -> list[Path]:
+    """Scope track-indexed rip evidence to its medium; leave ambiguous logs unused."""
+    if total_discs == 1 and disc == 1:
+        return paths
+    scoped: list[Path] = []
+    for path in paths:
+        hinted_discs: set[int] = set()
+        for number, info in tocs.items():
+            if str(path) in {str(info.get("cue") or ""), str(info.get("eac_log") or "")}:
+                hinted_discs.add(number)
+        for parent in path.relative_to(folder).parents:
+            found = library_layout.DISC_DIR_RE.match(parent.name)
+            if found:
+                hinted_discs.add(int(found.group(1)))
+        found = re.search(r"(?i)(?:^|[^a-z])(?:disc|disk|cd)[ _.-]*0*(\d+)(?:\D|$)", path.stem)
+        if found:
+            hinted_discs.add(int(found.group(1)))
+        if path.suffix.casefold() == ".cue":
+            try:
+                hinted_discs.add(mb_discid_from_cue.cue_disc_number(path, folder))
+            except (OSError, ValueError, MutagenError):
+                continue
+        if hinted_discs == {disc}:
+            scoped.append(path)
+    return scoped
+
+
 @isolated_worker_session
 def process_single_track(
     f: Path,
@@ -1868,6 +1901,13 @@ def process_single_track(
         return False, f"Review required for {f.name}: {explanation}"
     disc_val = str(inferred_disc)
     track_num = str(inferred_track)
+    rip_meta_files = rip_evidence_for_disc(
+        rip_meta_files,
+        folder,
+        inferred_disc,
+        album_tags.get("mb_tocs") or {},
+        int(album_tags.get("total_discs") or 1),
+    )
     # Embedded title is user/library evidence; filenames are only a fallback
     # and matching signal, never an automatic typography rewrite.
     final_title = current_title or filename_title or stem
@@ -2436,7 +2476,7 @@ def process_single_track(
     edition_yr = album_tags.get("edition_year", "")
     discogs_dt = album_tags.get("discogs_release_date", "")
 
-    physical_date = press_dt or edition_yr or discogs_dt or orig_dt
+    physical_date = press_dt or edition_yr or discogs_dt
     # DATE is the date of this exact edition. ORIGINALDATE is the earliest
     # reliably known release date. Keeping those meanings stable prevents a
     # remaster from masquerading as the original pressing.
@@ -2449,7 +2489,7 @@ def process_single_track(
     if tag_year:
         manifest_tags.append(("YEAR", tag_year[:4]))
 
-    if album_tags.get("press_date_source"):
+    if tag_date and album_tags.get("press_date_source"):
         manifest_tags.append(("DATE_SOURCE", album_tags["press_date_source"]))
 
     manifest_tags.append(("DISCNUMBER", disc_val))
@@ -2468,10 +2508,16 @@ def process_single_track(
 
     if album_tags.get("edition"):
         manifest_tags.append(("EDITION", album_tags["edition"]))
-    if album_tags.get("freedb_discid"):
-        manifest_tags.append(("FREEDB_DISCID", album_tags["freedb_discid"]))
-    if album_tags.get("freedb_discid_source"):
-        manifest_tags.append(("FREEDB_DISCID_SOURCE", album_tags["freedb_discid_source"]))
+    disc_key = int(disc_val)
+    medium_tocs = album_tags.get("mb_tocs") or {}
+    medium_toc = medium_tocs.get(disc_key, {})
+    legacy_single_disc = not medium_tocs and disc_key == 1 and str(total_discs) == "1"
+    per_freedb = medium_toc.get("freedb_discid") or (album_tags.get("freedb_discid") if legacy_single_disc else "")
+    if per_freedb:
+        manifest_tags.append(("FREEDB_DISCID", per_freedb))
+        per_freedb_source = medium_toc.get("source") or album_tags.get("freedb_discid_source")
+        if per_freedb_source:
+            manifest_tags.append(("FREEDB_DISCID_SOURCE", per_freedb_source))
 
     for g in album_tags.get("genres", []):
         manifest_tags.append(("GENRE", g))
@@ -2539,10 +2585,12 @@ def process_single_track(
     if album_tags.get("mb_release_id"):
         manifest_tags.append(("MUSICBRAINZ_ALBUMID", album_tags["mb_release_id"]))
     # Disc IDs identify a physical medium, never the whole multi-disc box.
-    disc_key = int(disc_val) if str(disc_val).isdigit() else 1
-    medium_toc = (album_tags.get("mb_tocs") or {}).get(disc_key, {})
-    per_disc_id = medium_toc.get("discid") if medium_toc.get("toc_exact") else album_tags.get("mb_discid")
-    per_disc_source = medium_toc.get("source") or album_tags.get("mb_discid_source")
+    per_disc_id = medium_toc.get("discid") if medium_toc.get("toc_exact") else ""
+    # Legacy scalar evidence is safe only for the sole medium. Never borrow
+    # the first disc's physical TOC for a missing or synthetic second TOC.
+    if legacy_single_disc:
+        per_disc_id = album_tags.get("mb_discid")
+    per_disc_source = medium_toc.get("source") or (album_tags.get("mb_discid_source") if per_disc_id else "")
     if per_disc_id:
         manifest_tags.append(("MUSICBRAINZ_DISCID", per_disc_id))
     if per_disc_source:
@@ -2608,10 +2656,12 @@ def process_single_track(
     if is_compilation:
         manifest_tags.append(("COMPILATION", "1"))
 
-    if album_tags.get("rip_toc_source"):
-        manifest_tags.append(("RIP_TOC_SOURCE", album_tags["rip_toc_source"]))
-    if album_tags.get("rip_toc_tracks"):
-        manifest_tags.append(("RIP_TOC_TRACKS", str(album_tags["rip_toc_tracks"])))
+    per_toc_source = medium_toc.get("source") or (album_tags.get("rip_toc_source") if legacy_single_disc else "")
+    per_toc_tracks = medium_toc.get("track_count") or (album_tags.get("rip_toc_tracks") if legacy_single_disc else "")
+    if per_toc_source:
+        manifest_tags.append(("RIP_TOC_SOURCE", per_toc_source))
+    if per_toc_tracks:
+        manifest_tags.append(("RIP_TOC_TRACKS", str(per_toc_tracks)))
 
     for s in album_tags.get("styles", []):
         manifest_tags.append(("STYLE", s))
@@ -3580,8 +3630,11 @@ def process_album(
 
     rip_meta_files = [
         p
-        for p in folder.iterdir()
-        if p.is_file() and (p.suffix.lower() in (".cue", ".log", ".accurip") or "accuraterip" in p.name.lower())
+        for p in sorted(folder.rglob("*"))
+        if p.is_file()
+        and not p.is_symlink()
+        and not is_pipeline_private(p, root=folder)
+        and (p.suffix.lower() in (".cue", ".log", ".accurip") or "accuraterip" in p.name.lower())
     ]
     if rip_meta_files:
         print("  -> Rip metadata: CUE/LOG/AccurateRip files found; track-level flags evaluated.")
@@ -4487,9 +4540,6 @@ def process_album(
         if not quiet:
             print(f"  -> DR14: skipped ({'--dry-run' if dry_run else '--no-dr14'}).")
     else:
-        existing_rep = dr14_parse.find_report_in_dir(folder)
-        if existing_rep:
-            dr_src = existing_rep.name
         dr_track_map, album_dr, _dr_db_info = measure_album_dr14(
             folder,
             flac_files,
@@ -4502,6 +4552,7 @@ def process_album(
             verbose=is_verbose,
             report_sink=generated_dr_reports.append,
         )
+        dr_src = _dr_db_info.get("measurement_source", dr14_parse.DR_ALGORITHM_VERSION)
         if album_dr:
             print(f"  -> Dynamic Range: Album DR{album_dr} ({dr_src})")
 
@@ -4686,8 +4737,13 @@ def process_album(
 
     # Pre-calculate EAC Peak Table across the album for Steve Hoffman Forums mastering index
     album_peaks: list[str] = []
-    for t_idx in range(1, len(flac_files) + 1):
-        pk = get_track_eac_peak(rip_meta_files, t_idx)
+    for peak_flac in flac_files:
+        peak_tags = FLAC(peak_flac).tags
+        peak_disc, peak_number, _title, conflicts = library_layout.position_evidence(peak_flac, folder, peak_tags)
+        if peak_disc is None or peak_number is None or conflicts:
+            continue
+        scoped_rip_files = rip_evidence_for_disc(rip_meta_files, folder, peak_disc, mb_tocs, int(total_discs))
+        pk = get_track_eac_peak(scoped_rip_files, peak_number, flac_path=peak_flac)
         if pk:
             album_peaks.append(pk.replace(" %", ""))
     if album_peaks and len(album_peaks) == len(flac_files):
@@ -5032,6 +5088,11 @@ def load_env_file(env_path: Path | None = None) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     load_env_file()
+    arguments = sys.argv[1:] if argv is None else argv
+    if arguments and arguments[0] == "search":
+        from release_search import main as search_main
+
+        return search_main(arguments[1:], prog=f"{Path(sys.argv[0]).name} search")
     parser = argparse.ArgumentParser(
         description="AudiophileArchTagger 6.0: High-performance multithreaded metadata tagging engine."
     )
@@ -5078,7 +5139,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--preview-size",
         type=int,
-        default=int(os.environ.get("COVER_PREVIEW_SIZE", "1200")),
+        default=os.environ.get("COVER_PREVIEW_SIZE", "1200"),
         help="Target pixel dimension for terminal cover preview (default: 1200)",
     )
     parser.add_argument("--helper", choices=["eac-peak", "acoustid", "acoustid-candidates"], help=argparse.SUPPRESS)

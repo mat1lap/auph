@@ -23,3 +23,6 @@ song.*
 *.rollback.flac
 *.replaygain.flac
 *.backup.flac
+
+# Private frozen forum evidence and model benchmark artifacts
+/.mastering-benchmarks/

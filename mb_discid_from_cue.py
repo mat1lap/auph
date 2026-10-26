@@ -14,12 +14,13 @@ import hashlib
 import json
 import re
 import sys
+from itertools import pairwise
 from pathlib import Path
 
 from mutagen.flac import FLAC
 
 from library_files import is_pipeline_private, iter_library_flacs
-from library_layout import position_evidence
+from library_layout import DISC_DIR_RE, DISC_TRACK_RE, position_evidence
 
 ENCODINGS = ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "cp1252", "latin-1")
 
@@ -68,7 +69,7 @@ def parse_time_to_frames(v: str) -> int:
     return (minutes * 60 + ss) * 75 + ff
 
 
-def parse_cue(cue: Path) -> list[dict]:
+def parse_cue(cue: Path, *, require_indexes: bool = True) -> list[dict]:
     current_file = None
     tracks = []
     all_tracks = []
@@ -104,11 +105,18 @@ def parse_cue(cue: Path) -> list[dict]:
             all_tracks[-1]["index01"] = val
             if all_tracks[-1]["mode"] == "AUDIO":
                 tracks[-1]["index01"] = val
-    if any(t["index01"] is None for t in tracks):
+    if require_indexes and any(t["index01"] is None for t in tracks):
         raise ValueError("audio TRACK is missing INDEX 01 in CUE")
     numbers = [int(str(t["number"])) for t in tracks]
     if len(numbers) != len(set(numbers)) or numbers != sorted(numbers):
         raise ValueError("CUE audio track numbers are duplicated or out of order")
+    previous_file = None
+    previous_index = -1
+    for track in tracks:
+        index = int(str(track["index01"])) if track["index01"] is not None else -1
+        if index >= 0 and previous_index >= 0 and track["file"] == previous_file and index <= previous_index:
+            raise ValueError("CUE INDEX 01 offsets within one file are not strictly increasing")
+        previous_file, previous_index = track["file"], index
     valid_tracks = tracks
     if not valid_tracks:
         raise ValueError("No audio TRACK/INDEX 01 entries found in CUE")
@@ -312,6 +320,17 @@ def build(cue: Path) -> dict:
             return build_from_flac_dir(cue)
 
     ct = parse_cue(cue)
+    for track in ct:
+        if not track.get("file"):
+            continue
+        referenced = cue.parent / str(track["file"]).replace("\\", "/")
+        boundary = cue.parent.resolve()
+        if (
+            not referenced.resolve().is_relative_to(boundary)
+            or referenced.is_symlink()
+            or any(parent.is_symlink() for parent in referenced.parents if parent != boundary)
+        ):
+            raise ValueError(f"refusing symlinked or outside CUE audio reference: {referenced}")
     nums = [int(t["number"]) for t in ct]
     freedb = parse_cue_freedb_discid(cue)
     log_used = None
@@ -446,6 +465,8 @@ def build(cue: Path) -> dict:
             "cue": str(cue),
         }
 
+    if any(left >= right for left, right in pairwise(offsets)):
+        raise ValueError("physical track offsets are not strictly increasing")
     if leadout <= offsets[-1]:
         raise ValueError(f"invalid lead-out {leadout} <= last track offset {offsets[-1]}")
 
@@ -478,12 +499,52 @@ def build(cue: Path) -> dict:
     }
 
 
+def cue_disc_number(cue: Path, folder: Path, *, single_cue: bool = False) -> int:
+    """Associate a CUE with explicit medium evidence, never enumeration order."""
+    discs: set[int] = set()
+    for parent in cue.relative_to(folder).parents:
+        match = DISC_DIR_RE.match(parent.name)
+        if match:
+            discs.add(int(match.group(1)))
+    match = re.search(r"(?i)(?:^|[^a-z])(?:disc|disk|cd)[ _.-]*0*(\d+)(?:\D|$)", cue.stem)
+    if match:
+        discs.add(int(match.group(1)))
+    for track in parse_cue(cue, require_indexes=False):
+        if not track.get("file"):
+            continue
+        path = cue.parent / str(track["file"]).replace("\\", "/")
+        # Only existing local references can supply numbering evidence.
+        if path.suffix.casefold() != ".flac":
+            path = path.with_suffix(".flac")
+        if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(folder.resolve()):
+            continue
+        for parent in path.relative_to(folder).parents:
+            match = DISC_DIR_RE.match(parent.name)
+            if match:
+                discs.add(int(match.group(1)))
+        match = DISC_TRACK_RE.match(path.stem)
+        if match:
+            discs.add(int(match.group(1)))
+        audio = FLAC(path)
+        for value in audio.get("DISCNUMBER", []):
+            head = str(value).split("/", 1)[0].strip()
+            if not head.isdigit() or int(head) <= 0:
+                raise ValueError(f"invalid disc evidence in {path.name}")
+            discs.add(int(head))
+    if len(discs) > 1 or 0 in discs:
+        raise ValueError(f"conflicting CUE medium evidence: {cue}")
+    if discs:
+        return next(iter(discs))
+    if single_cue:
+        return 1
+    raise ValueError(f"CUE lacks medium evidence: {cue}")
+
+
 def build_all(folder: Path) -> dict[int, dict]:
     """Build one TOC record per medium, never silently choosing the first CUE.
 
-    CUE files are associated with their DISCNUMBER when available, otherwise
-    their deterministic filename order is used.  A caller can therefore keep
-    Disc IDs and physical evidence attached to the correct files.
+    CUE files are associated using directory, filename and referenced-track
+    DISCNUMBER evidence. Ambiguous multi-CUE layouts require review.
     """
     cues = sorted(
         (
@@ -513,28 +574,19 @@ def build_all(folder: Path) -> dict[int, dict]:
             raise ValueError(f"No CUE or FLAC files found in directory: {folder}")
         return {disc: build_from_flac_dir(group[0].parent, files=group) for disc, group in sorted(by_disc.items())}
     result: dict[int, dict] = {}
-    next_disc = 1
     for cue_path in cues:
         info = build(cue_path)
-        disc = next_disc
-        for flac_path in cue_path.parent.glob("*.flac"):
-            try:
-                audio = FLAC(str(flac_path))
-                tags = audio.tags
-                raw = (tags.get("DISCNUMBER", [""]) if tags is not None else [""])[0]
-                if str(raw).split("/", 1)[0].strip().isdigit():
-                    disc = int(str(raw).split("/", 1)[0].strip())
-                    break
-            except (OSError, ValueError):
-                continue
+        disc = cue_disc_number(cue_path, folder, single_cue=len(cues) == 1)
         if disc in result:
             raise ValueError(f"ambiguous CUE files for disc {disc}: {cue_path}")
         result[disc] = info
-        next_disc = max(next_disc + 1, disc + 1)
     return result
 
 
 def main() -> int:
+    if sys.argv[1:] in (["-h"], ["--help"]):
+        print("usage: mb_discid_from_cue.py CUE_OR_FLAC_DIRECTORY [--json]")
+        return 0
     if len(sys.argv) < 2:
         return 2
     cue = Path(sys.argv[1]).resolve()

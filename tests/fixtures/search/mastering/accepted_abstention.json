@@ -1,0 +1,184 @@
+{
+  "_provenance": "Anonymized structural copy of the accepted 2026-10-12 live recommendation. Example candidate values below are synthetic, not measured or copied release facts.",
+  "candidates": [
+    {
+      "candidate_id": "fixture:1",
+      "source_url": "https://example.invalid/",
+      "torrent_title": "Example Artist - Example Album",
+      "lossless": true,
+      "seeders": 5,
+      "evidence": {
+        "lossless": {
+          "claim": "True",
+          "source": "fixture",
+          "original": "Synthetic FLAC claim"
+        },
+        "seeders": {
+          "claim": "5",
+          "source": "fixture",
+          "original": "Synthetic availability"
+        }
+      }
+    },
+    {
+      "candidate_id": "fixture:2",
+      "source_url": "https://example.invalid/",
+      "torrent_title": "Example Artist - Example Album",
+      "lossless": true,
+      "seeders": 5,
+      "evidence": {
+        "lossless": {
+          "claim": "True",
+          "source": "fixture",
+          "original": "Synthetic FLAC claim"
+        },
+        "seeders": {
+          "claim": "5",
+          "source": "fixture",
+          "original": "Synthetic availability"
+        }
+      }
+    },
+    {
+      "candidate_id": "fixture:3",
+      "source_url": "https://example.invalid/",
+      "torrent_title": "Example Artist - Example Album",
+      "lossless": true,
+      "seeders": 5,
+      "evidence": {
+        "lossless": {
+          "claim": "True",
+          "source": "fixture",
+          "original": "Synthetic FLAC claim"
+        },
+        "seeders": {
+          "claim": "5",
+          "source": "fixture",
+          "original": "Synthetic availability"
+        }
+      }
+    },
+    {
+      "candidate_id": "fixture:4",
+      "source_url": "https://example.invalid/",
+      "torrent_title": "Example Artist - Example Album",
+      "lossless": true,
+      "seeders": 5,
+      "evidence": {
+        "lossless": {
+          "claim": "True",
+          "source": "fixture",
+          "original": "Synthetic FLAC claim"
+        },
+        "seeders": {
+          "claim": "5",
+          "source": "fixture",
+          "original": "Synthetic availability"
+        }
+      }
+    },
+    {
+      "candidate_id": "fixture:5",
+      "source_url": "https://example.invalid/",
+      "torrent_title": "Example Artist - Example Album",
+      "lossless": true,
+      "seeders": 5,
+      "evidence": {
+        "lossless": {
+          "claim": "True",
+          "source": "fixture",
+          "original": "Synthetic FLAC claim"
+        },
+        "seeders": {
+          "claim": "5",
+          "source": "fixture",
+          "original": "Synthetic availability"
+        }
+      }
+    }
+  ],
+  "response": {
+    "selected_candidate_id": "fixture:4",
+    "ranked_candidate_ids": [
+      "fixture:4",
+      "fixture:1",
+      "fixture:3",
+      "fixture:2",
+      "fixture:5"
+    ],
+    "reasons": [
+      {
+        "candidate_id": "fixture:4",
+        "preference": "lossless",
+        "evidence_ids": [
+          "lossless"
+        ]
+      },
+      {
+        "candidate_id": "fixture:4",
+        "preference": "availability",
+        "evidence_ids": [
+          "seeders"
+        ]
+      },
+      {
+        "candidate_id": "fixture:1",
+        "preference": "lossless",
+        "evidence_ids": [
+          "lossless"
+        ]
+      },
+      {
+        "candidate_id": "fixture:3",
+        "preference": "lossless",
+        "evidence_ids": [
+          "lossless"
+        ]
+      },
+      {
+        "candidate_id": "fixture:2",
+        "preference": "availability",
+        "evidence_ids": [
+          "seeders"
+        ]
+      },
+      {
+        "candidate_id": "fixture:5",
+        "preference": "availability",
+        "evidence_ids": [
+          "seeders"
+        ]
+      }
+    ],
+    "uncertainty": [
+      "mastering_not_verified",
+      "technical_claims_unmeasured"
+    ],
+    "warnings": [
+      "missing_details"
+    ],
+    "mastering_review": {
+      "status": "insufficient_evidence",
+      "preferred_edition": "",
+      "features": {
+        "label": "",
+        "catalog_number": "",
+        "year": "",
+        "country": "",
+        "medium": "",
+        "matrix": "",
+        "mastering_credit": ""
+      },
+      "source_ids": [],
+      "candidate_id": "",
+      "match_confidence": "unestablished",
+      "comparisons": [],
+      "limitations": [
+        "subjective_reviews",
+        "mastering_identity_unverified",
+        "limited_sources",
+        "snippet_only"
+      ]
+    }
+  }
+}

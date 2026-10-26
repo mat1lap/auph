@@ -1,0 +1,7 @@
+{
+  "selected_candidate_id": "fixture:1",
+  "ranked_candidate_ids": ["fixture:1"],
+  "reasons": [{"candidate_id": "fixture:1", "preference": "uncertain", "evidence_ids": ["artist"]}],
+  "uncertainty": ["mastering_not_verified", "technical_claims_unmeasured"],
+  "warnings": []
+}

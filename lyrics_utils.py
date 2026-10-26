@@ -496,17 +496,19 @@ def invoke_lyrics_provider(
     state.responses = 0
     state.trusted_no_result = False
     try:
-        result = provider(*args, **kwargs)
-    except Exception as exc:
-        _record_provider_failure(exc)
-        result = None
-    failures = list(state.failures)
-    responses = int(state.responses)
-    trusted_empty = bool(state.trusted_no_result)
-    state.active = previous_active
-    state.failures = previous_failures
-    state.responses = previous_responses
-    state.trusted_no_result = previous_trusted_empty
+        try:
+            result = provider(*args, **kwargs)
+        except Exception as exc:
+            _record_provider_failure(exc)
+            result = None
+        failures = list(state.failures)
+        responses = int(state.responses)
+        trusted_empty = bool(state.trusted_no_result)
+    finally:
+        state.active = previous_active
+        state.failures = previous_failures
+        state.responses = previous_responses
+        state.trusted_no_result = previous_trusted_empty
     failure_severity = {
         "AUTHENTICATION_ERROR": 7,
         "BLOCKED": 6,
@@ -540,6 +542,19 @@ def invoke_lyrics_provider(
             and result.get("found")
             and not result.get("generated")
             and not result.get("acquisition_status")
+            and not failures
+            and not any(
+                status in str(warning).upper()
+                for warning in result.get("validationWarnings", [])
+                for status in (
+                    "PARSER_ERROR",
+                    "INVALID_RESPONSE",
+                    "TRANSIENT_ERROR",
+                    "RATE_LIMITED",
+                    "AUTHENTICATION_ERROR",
+                    "BLOCKED",
+                )
+            )
             and any(result.get(key) for key in ("syncedLyrics", "plainLyrics", "translationLyrics", "romajiLyrics"))
         ):
             try:
@@ -812,7 +827,13 @@ def sanitize_lyrics(
 
 def parse_time(t_str: str) -> float:
     """Parse time string in format mm:ss.xxx, hh:mm:ss.xxx or seconds."""
-    t_str = t_str.strip().rstrip("s")
+    t_str = t_str.strip()
+    offset = re.fullmatch(r"(\d+(?:\.\d+)?)(ms|s|m|h)", t_str)
+    if offset:
+        value = float(offset.group(1)) * {"ms": 0.001, "s": 1, "m": 60, "h": 3600}[offset.group(2)]
+        if not math.isfinite(value):
+            raise ValueError("TTML offset must be finite")
+        return value
     parts = t_str.split(":")
     if len(parts) == 3:
         h, m, s = parts
@@ -859,6 +880,8 @@ def fmt_lrc_time_precision(seconds: float, precision: int) -> str:
 
 
 def _source_time_precision(value: str) -> int:
+    if value.strip().endswith("ms"):
+        return 3
     fractional = re.search(r"[.,](\d+)$", value.strip().rstrip("s"))
     return min(3, len(fractional.group(1))) if fractional else 0
 
@@ -1071,6 +1094,11 @@ def parse_ttml(
             has_word_sync = True
             word_chunks: list[str] = []
             plain_words: list[str] = []
+            # Text before the first timed span has no word timing of its own.
+            # Preserve it without inventing a timestamp.
+            if el.text:
+                word_chunks.append(el.text)
+                plain_words.append(el.text)
 
             for s_st, _, s_text, s_bg, s_precision in spans_info:
                 clean_txt = s_text.replace("\r\n", "\n").replace("\r", "\n")
@@ -6568,9 +6596,9 @@ def fetch_vocadb(
                 continue
             try:
                 it = item
-                names = it.get("names") or {}
-                if not isinstance(names, dict):
-                    raise TypeError("VocaDB song names field is not an object")
+                names = it.get("names") or []
+                if not isinstance(names, (list, dict)):
+                    raise TypeError("VocaDB song names field is not an array")
                 artist_rows = it.get("artists") or []
                 if not isinstance(artist_rows, list):
                     raise TypeError("VocaDB song artists field is not an array")
@@ -6583,14 +6611,19 @@ def fetch_vocadb(
                         raise TypeError("VocaDB artist field is not an object")
                     artist_names.append(str(artist_obj.get("name") or entry.get("name") or ""))
                 candidate_artist = " ".join(name for name in artist_names if name)
-                name_candidates = [
-                    str(it.get("name") or ""),
-                    str(names.get("original") or ""),
-                ]
-                additional_names = names.get("additionalNames") or []
-                if not isinstance(additional_names, list):
-                    raise TypeError("VocaDB additionalNames field is not an array")
-                name_candidates.extend(str(value) for value in additional_names)
+                name_candidates = [str(it.get("name") or ""), str(it.get("defaultName") or "")]
+                if isinstance(names, list):
+                    for name in names:
+                        if not isinstance(name, dict):
+                            raise TypeError("VocaDB localized name is not an object")
+                        name_candidates.append(str(name.get("value") or ""))
+                else:
+                    # Retain compatibility with older adapter response forms.
+                    name_candidates.append(str(names.get("original") or ""))
+                    additional_names = names.get("additionalNames") or []
+                    if not isinstance(additional_names, list):
+                        raise TypeError("VocaDB additionalNames field is not an array")
+                    name_candidates.extend(str(value) for value in additional_names)
                 candidate_title = next(
                     (
                         candidate
@@ -6699,7 +6732,7 @@ def fetch_vocadb(
                 _record_provider_failure(exc)
                 failures.append((status, detail))
 
-        if items:
+        if candidates:
             break
 
     if candidates:
@@ -7080,13 +7113,17 @@ def fetch_apple_music_ttml(
             if not isinstance(s_data, dict) or not isinstance(s_data.get("data"), list):
                 raise TypeError("Unison search response has no data array")
             items = s_data["data"]
-            for item in items[:20]:
+            matching_items = 0
+            for item in items:
                 if not isinstance(item, dict):
                     _record_provider_failure(TypeError("Unison search response contains a non-object item"))
                     continue
                 t_cand = item.get("song", "")
                 a_cand = item.get("artist", "")
                 if is_track_match(t_cand, a_cand, song, artist):
+                    matching_items += 1
+                    if matching_items > 20:
+                        continue
                     vid = item.get("videoId")
                     lid = item.get("id")
                     f_url = (
@@ -7130,8 +7167,10 @@ def fetch_apple_music_ttml(
     if candidates:
         selected = dict(candidates[0])
         selected["alternatives"] = candidates[1:]
-        if len(items) > 20:
-            selected.setdefault("validationWarnings", []).append("Unison search truncated to 20 items")
+        if matching_items > 20:
+            selected.setdefault("validationWarnings", []).append(
+                "Unison detail retrieval truncated to 20 matching items"
+            )
         return selected
 
     # 2. Direct endpoint fallback

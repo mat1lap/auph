@@ -1,0 +1,65 @@
+# Select with AUDIOPHILE_CONFIG=/absolute/path/to/your-policy.toml.
+# This section can be appended to the existing metadata policy. Never put secrets here.
+[search]
+research_page_transport = "flaresolverr"
+jackett_url = "http://127.0.0.1:9117"
+jackett_indexer = "rutracker" # RuTracker.org, never all/filter/rutracker-ru
+jackett_key_env = "JACKETT_API_KEY"
+topic_base_url = "https://rutracker.org/forum"
+topic_cookie_env = "RUTRACKER_COOKIE" # authorized cookie header; optional details
+flaresolverr_url = "http://127.0.0.1:8191"
+flaresolverr_timeout = 30.0
+result_limit = 100
+page_size = 100
+max_pages = 4
+timeout = 60.0
+prefer_lossless = true
+prefer_documented_rip = true
+allow_partial = false
+backend = "gemini" # none | gemini | openai | local
+# Explicit consent to disclose normalized query/topic evidence to a remote model:
+remote_metadata_disclosure = true
+# Set an actual model available to your account/server. No model is guessed.
+openai_endpoint = "https://api.openai.com/v1/chat/completions"
+openai_model = ""
+openai_key_env = "OPENAI_API_KEY"
+gemini_endpoint = "https://generativelanguage.googleapis.com/v1beta"
+gemini_model = "gemini-3.5-flash-lite"
+gemini_key_env = "GEMINI_API_KEY"
+local_endpoint = "http://127.0.0.1:1234/v1/chat/completions"
+local_model = ""
+local_key_env = "LOCAL_LLM_API_KEY" # optional for local
+structured_mode = "json" # schema | json | text; still validated locally
+qbittorrent_url = "http://127.0.0.1:8080"
+qbittorrent_user_env = "QBITTORRENT_USERNAME"
+qbittorrent_password_env = "QBITTORRENT_PASSWORD"
+save_path = "" # absolute destination on qBittorrent host; required for --submit
+state_directory = "" # default: $XDG_STATE_HOME/auph/search-submissions
+
+research_backend = "serper"
+
+research_key_env = "SERPER_API_KEY"
+
+research_disclosure = true
+
+mastering_pipeline = true
+
+research_adaptive = true
+
+research_follow_pages = true
+
+research_queries = 8
+
+research_pages = 10
+
+research_posts_per_page = 80
+
+mastering_max_sources = 40
+
+mastering_output_tokens = 16384
+
+detail_budget = 15
+
+detail_time_budget = 600.0
+
+gemini_thinking_level = "medium"

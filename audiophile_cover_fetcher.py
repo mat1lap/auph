@@ -56,7 +56,9 @@ import requests
 from mutagen import MutagenError
 from PIL import Image, ImageCms, ImageDraw, ImageFilter, ImageOps, ImageStat, UnidentifiedImageError
 
-from provider_cache import redact_secrets, retry_delay
+from http_sessions import clone_session
+from library_files import iter_library_flacs
+from provider_cache import JsonSession, error_envelope_classification, redact_secrets, retry_delay, session_cache_key
 
 USER_AGENT = "AudiophileArchTagger/6.0 (audiophile@music-archive.org)"
 TIMEOUT = 12
@@ -595,8 +597,9 @@ class CoverFetcher:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache_ttl_seconds = float(os.environ.get("COVER_CACHE_TTL_SECONDS", str(7 * 24 * 3600)))
 
-        self.session = requests.Session()
-        self.session.headers.update({"User-Agent": USER_AGENT})
+        self.session: JsonSession = requests.Session()
+        if isinstance(self.session, requests.Session):
+            self.session.headers.update({"User-Agent": USER_AGENT})
         self._thread_local = threading.local()
         self.last_fetch_errors: dict[str, str] = {}
         self._analysis_memory_cache: dict[str, dict[str, Any]] = {}
@@ -618,38 +621,48 @@ class CoverFetcher:
         return self.cache_dir / f"{h}.cache"
 
     def fetch_url(self, url: str, headers: dict[str, str] | None = None) -> bytes | None:
-        cache_file = self._get_cache_path(url)
-        if (
-            cache_file.is_file()
-            and cache_file.stat().st_size > 0
-            and time.time() - cache_file.stat().st_mtime <= self.cache_ttl_seconds
-        ):
+        def json_error(body: bytes) -> str:
+            if not body.lstrip().startswith(b"{"):
+                return ""
             try:
-                cached = cache_file.read_bytes()
-                if len(cached) <= MAX_IMAGE_BYTES and (_looks_like_json(cached) or _image_header_is_supported(cached)):
-                    self._count("url_cache_hits")
-                    self.last_fetch_errors.pop(url, None)
-                    return cached
-            except OSError:
-                pass
+                value = json.loads(body)
+            except (ValueError, UnicodeDecodeError, RecursionError):
+                return "invalid_json_payload"
+            if isinstance(value, dict) and (value.get("status") == "error" or value.get("error")):
+                return error_envelope_classification(value).casefold()
+            return ""
 
         hdrs = {"User-Agent": USER_AGENT}
         if headers:
             hdrs.update(headers)
+        session = self.session
+        if threading.current_thread() is not threading.main_thread() and type(session) is requests.Session:
+            # Share only adapter pools. Preserve configured auth/proxy/header
+            # state while isolating mutable cookies in each worker.
+            session = clone_session(session)
+        cache_key = session_cache_key(session, url, hdrs)
+        cache_file = self._get_cache_path(cache_key)
+        try:
+            info = cache_file.stat()
+            if 0 < info.st_size <= MAX_IMAGE_BYTES and time.time() - info.st_mtime <= self.cache_ttl_seconds:
+                with cache_file.open("rb") as handle:
+                    cached = handle.read(MAX_IMAGE_BYTES + 1)
+                if (
+                    len(cached) <= MAX_IMAGE_BYTES
+                    and (_looks_like_json(cached) or _image_header_is_supported(cached))
+                    and not json_error(cached)
+                ):
+                    self._count("url_cache_hits")
+                    self.last_fetch_errors.pop(url, None)
+                    return cached
+        except OSError:
+            pass
 
-        resp: requests.Response | None = None
+        resp: Any = None
         for attempt in range(1, 4):
             resp = None
             payload: bytes | None = None
             try:
-                session = self.session
-                if threading.current_thread() is not threading.main_thread():
-                    thread_session: requests.Session | None = getattr(self._thread_local, "session", None)
-                    if thread_session is None:
-                        thread_session = requests.Session()
-                        thread_session.headers.update({"User-Agent": USER_AGENT})
-                        self._thread_local.session = thread_session
-                    session = thread_session
                 self._count("http_requests")
                 resp = session.get(url, headers=hdrs, timeout=TIMEOUT, stream=True)
                 if resp.status_code == 200:
@@ -679,6 +692,16 @@ class CoverFetcher:
                     if content_type.startswith("image/") and not _image_header_is_supported(payload):
                         self.last_fetch_errors[url] = "invalid_image_payload"
                         return None
+                    failure = json_error(payload)
+                    if failure:
+                        self.last_fetch_errors[url] = failure
+                        return None
+                    vary = {
+                        name.strip().casefold() for name in str(resp.headers.get("Vary", "")).split(",") if name.strip()
+                    }
+                    if not vary <= {"authorization", "cookie", "accept-language", "accept-encoding"}:
+                        self.last_fetch_errors.pop(url, None)
+                        return payload
                     fd, tmp_name = tempfile.mkstemp(prefix=f".{cache_file.name}.", suffix=".tmp", dir=self.cache_dir)
                     os.close(fd)
                     tmp_path = Path(tmp_name)
@@ -875,6 +898,9 @@ class CoverFetcher:
 
             release_url = str(data.get("release") or "")
             for provider_order, img in enumerate(data.get("images", [])):
+                if not isinstance(img, dict):
+                    self.last_fetch_errors[caa_url] = "invalid_response: malformed CAA image row"
+                    continue
                 orig_img = str(img.get("image") or "")
                 if not orig_img:
                     continue
@@ -1045,7 +1071,7 @@ class CoverFetcher:
 
         seen_uris: set[str] = set()
         release_conflict = bool(response_release_id and self.discogs_id and response_release_id != self.discogs_id)
-        exact_release = bool(self.discogs_id and not release_conflict)
+        exact_release = bool(self.discogs_id and response_release_id == self.discogs_id)
         barcode_values = tuple(
             re.sub(r"\D", "", str(item.get("value") or ""))
             for item in release_data.get("identifiers", [])
@@ -1080,6 +1106,9 @@ class CoverFetcher:
         ):
             edition_conflicts.append("country differs from local edition")
         for provider_order, img in enumerate(images):
+            if not isinstance(img, dict):
+                self.last_fetch_errors["Discogs images"] = "invalid_response: malformed Discogs image row"
+                continue
             uri = img.get("uri")
             if not uri or uri in seen_uris:
                 continue
@@ -1168,6 +1197,15 @@ class CoverFetcher:
         if self.no_local_covers or not self.folder or not self.folder.is_dir():
             return candidates
 
+        def read_local(path: Path) -> bytes:
+            if path.is_symlink() or not 0 < path.stat().st_size <= MAX_IMAGE_BYTES:
+                raise ValueError("local artwork is symlinked, empty or exceeds the byte limit")
+            with path.open("rb") as handle:
+                value = handle.read(MAX_IMAGE_BYTES + 1)
+            if len(value) > MAX_IMAGE_BYTES:
+                raise ValueError("local artwork grew beyond the byte limit")
+            return value
+
         for fname in (
             *sorted(
                 p.name
@@ -1184,9 +1222,9 @@ class CoverFetcher:
             "front_cover.png",
         ):
             lp = self.folder / fname
-            if lp.is_file() and lp.stat().st_size > 0:
+            if lp.is_file():
                 try:
-                    data = lp.read_bytes()
+                    data = read_local(lp)
                     cand = CoverCandidate(
                         provider="Local Existing File",
                         url=str(lp),
@@ -1203,14 +1241,14 @@ class CoverFetcher:
                         provenance_confidence=0.98,
                     )
                     candidates.append(cand)
-                except OSError:
-                    pass
+                except (OSError, ValueError) as exc:
+                    self.last_fetch_errors[str(lp)] = str(exc)
 
         for subdir_name in ("Scans", "scans", "Artwork", "artwork", "Covers", "covers", "Scan", "scan"):
             subdir = self.folder / subdir_name
-            if subdir.is_dir():
+            if subdir.is_dir() and not subdir.is_symlink():
                 for scan_file in subdir.glob("*.*"):
-                    if scan_file.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp") and scan_file.stat().st_size > 0:
+                    if scan_file.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp") and scan_file.is_file():
                         sname_lower = scan_file.name.lower()
                         excluded_role = next(
                             (
@@ -1222,7 +1260,7 @@ class CoverFetcher:
                         )
                         if not excluded_role and any(k in sname_lower for k in ("front", "cover", "folder", "00")):
                             try:
-                                data = scan_file.read_bytes()
+                                data = read_local(scan_file)
                                 cand = CoverCandidate(
                                     provider="Local Optical Scan",
                                     url=str(scan_file),
@@ -1238,13 +1276,15 @@ class CoverFetcher:
                                     provenance_confidence=0.95,
                                 )
                                 candidates.append(cand)
-                            except OSError:
-                                pass
+                            except (OSError, ValueError) as exc:
+                                self.last_fetch_errors[str(scan_file)] = str(exc)
 
         # Existing embedded fronts are preservation material and must compete
         # as exact-release candidates instead of being silently discarded.
         seen_embedded: set[str] = set()
-        for first_flac in sorted(self.folder.glob("*.flac")):
+        for first_flac in iter_library_flacs(self.folder):
+            if first_flac.is_symlink():
+                continue
             try:
                 from mutagen.flac import FLAC
 
@@ -1431,7 +1471,11 @@ class CoverFetcher:
         candidates: list[CoverCandidate] = []
         q = f"{self.artist} {self.clean_album}"
         url = f"https://api.tidal.com/v1/search/albums?query={urllib.parse.quote(q)}&limit=5&countryCode=US"
-        hdrs = {"x-tidal-token": "CzET4vdadNUFQ5JU"}
+        token = os.environ.get("TIDAL_TOKEN", "").strip()
+        if not token:
+            self.last_fetch_errors[url] = "not_configured"
+            return candidates
+        hdrs = {"x-tidal-token": token}
         raw = self.fetch_url(url, headers=hdrs)
         if not raw:
             return candidates
@@ -3512,7 +3556,7 @@ def main() -> int:
     parser.add_argument(
         "--preview-size",
         type=int,
-        default=int(os.environ.get("COVER_PREVIEW_SIZE", "1200")),
+        default=os.environ.get("COVER_PREVIEW_SIZE", "1200"),
         help="Target pixel dimension for each cover in terminal preview (default: 1200)",
     )
     parser.add_argument("--report-json", help="JSON report content or file path for audition rendering")

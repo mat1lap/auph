@@ -204,6 +204,7 @@ options:
 DISCOGS_TOKEN=your_discogs_token
 MB_CONTACT=you@example.org
 ACOUSTID_API_KEY=your_acoustid_key
+TIDAL_TOKEN=your_authorized_tidal_token
 ```
 
 ## Usage
@@ -319,7 +320,16 @@ the compatibility policy for a whole library.
 
 ## Whole-project verification
 
-See [WHOLE_PROJECT_AUDIT.md](WHOLE_PROJECT_AUDIT.md) for the October 4 audit,
+See [COMPREHENSIVE_AUDIT_2026-10-06.md](COMPREHENSIVE_AUDIT_2026-10-06.md) for the
+October 6 implementation audit, current module coverage, confirmed fixes and
+verification limits. Discogs search retains up to three pages per query and
+reports truncation; unknown artwork release evidence is never promoted to an
+exact match. Disc IDs and rip-log evidence stay attached to their own medium.
+Original-release dates do not fill missing edition dates. Tidal artwork
+requires an explicitly supplied `TIDAL_TOKEN`; live access depends on the
+provider and the token's permissions.
+
+See [WHOLE_PROJECT_AUDIT.md](WHOLE_PROJECT_AUDIT.md) for the historical October 4 audit,
 confirmed defects, module coverage, temporary-fixture validation and remaining
 limits. [SELECTION_AUDIT.md](SELECTION_AUDIT.md) contains the detailed lyrics/art
 provider and failure matrices; fixture coverage does not certify live services.
@@ -424,3 +434,18 @@ valid track measurements are preserved and uncertified album fields cleared.
 Incomplete/unknown groups use track-only measurements and clear album fields,
 including the group fingerprint. Explicitly disabling loudness skips this policy.
 The first complete-album run may therefore update legacy gain tags.
+
+### Album/single search
+
+Search RuTracker via its configured Jackett indexer, export release evidence to
+CSV, optionally evaluate with Gemini/OpenAI/a local model, and explicitly confirm
+a release before qBittorrent submission. Details now default to five potentially
+relevant topics; `--full-details` attempts all discovered topics within the configured
+time bound. All rows remain in CSV:
+
+```bash
+.venv/bin/python audiophile_tagger.py search "Queen Jazz" --csv-only --csv /tmp/queen-jazz.csv
+```
+
+See [SEARCH.md](SEARCH.md) for configuration, selection policy, confirmation,
+conservative duplicate/uncertain-outcome safeguards and integration limitations.

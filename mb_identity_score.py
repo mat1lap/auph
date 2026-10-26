@@ -807,6 +807,12 @@ def evaluate_identity(
 def main(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv[1:]
+    if argv in (["-h"], ["--help"]):
+        print(
+            "usage: mb_identity_score.py DISCOGS_JSON MB_JSON COUNTRY CATNO BARCODE YEAR "
+            "[DISC_ID_EXACT] [TOC_JSON] [URL_RELATION] [ACOUSTID_JSON]"
+        )
+        return
     if len(argv) not in (6, 7, 8, 9, 10):
         raise SystemExit(
             "usage: mb_identity_score.py DISCOGS_JSON MB_JSON COUNTRY CATNO BARCODE YEAR "
